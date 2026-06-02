@@ -1,0 +1,18 @@
+{
+  "server": {
+    "transport": "http",
+    "baseUrl": "${CINATRA_BASE_URL:-http://localhost:3000}/api/mcp"
+  },
+  "primitives": [
+    "wordpress_status",
+    "wordpress_instances_list",
+    "wordpress_post_create_draft",
+    "wordpress_post_status",
+    "wordpress_post_get",
+    "wordpress_posts_list",
+    "wordpress_post_get_latest",
+    "wordpress_post_update_meta",
+    "wordpress_post_delete",
+    "wordpress_media_upload"
+  ]
+}
