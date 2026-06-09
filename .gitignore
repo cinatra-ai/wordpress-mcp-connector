@@ -1,0 +1,21 @@
+# Dependencies (no committed lockfile — see the install step in .github/workflows/ci.yml)
+node_modules/
+pnpm-lock.yaml
+
+# Build output (tsc outDir, see tsconfig.json)
+dist/
+
+# Test coverage (vitest)
+coverage/
+
+# Logs
+*.log
+
+# Env files & secrets
+.env
+.env.*
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
