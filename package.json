@@ -37,6 +37,27 @@
     "requestedHostPorts": [
       "nango"
     ],
-    "dependencies": []
+    "dependencies": [],
+    "capabilities": {
+      "widget-chat.wordpress-content-editor": "wordpress-widget-chat"
+    },
+    "widgetStream": {
+      "agentSlug": "wordpress-content-editor",
+      "label": "WordPress",
+      "subjectNoun": "post",
+      "skillCapability": "widget-chat.wordpress-content-editor",
+      "contextFields": [
+        { "key": "instanceId", "maxLength": 64 },
+        { "key": "postId", "maxLength": 32 },
+        { "key": "postType", "maxLength": 32 },
+        { "key": "postStatus", "maxLength": 32 },
+        { "key": "href", "maxLength": 500 }
+      ],
+      "auth": {
+        "tokenConfigKey": "wordpress_widget_auth",
+        "instancesConfigKey": "wordpress",
+        "requiredInstanceFields": ["id", "name", "username", "applicationPassword"]
+      }
+    }
   }
 }
