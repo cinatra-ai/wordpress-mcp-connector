@@ -46,6 +46,11 @@ function registerStubDeps() {
     buildListPage: (items, total) => ({ items, total }),
     dispatchContentEditor: dispatchContentEditorMock,
     deleteInstance: vi.fn(async () => {}),
+    // External-MCP toolbox surfaces (unused by this suite's code paths).
+    listMcpInstances: () => [],
+    probeMcpAdapter: async () => "registered" as const,
+    resolveMcpServerUrl: (siteUrl: string) => siteUrl,
+    isPrivateUrl: () => false,
   });
 }
 
