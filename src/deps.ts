@@ -38,6 +38,21 @@ export type DispatchContentEditorInput = {
   timeoutMs: number;
 };
 
+/**
+ * The instance fields the external-MCP toolbox needs (structural subset of the
+ * host's `WordPressInstanceSettings` — `@/lib/wordpress-api` stays host-side).
+ */
+export type WordPressMcpInstance = {
+  id: string;
+  name: string;
+  siteUrl: string;
+  username: string;
+  applicationPassword: string;
+};
+
+/** Probe verdict for a WP mcp-adapter endpoint (host-bound cached probe). */
+export type WordPressMcpProbeStatus = "registered" | "not_installed" | "auth_error" | "unreachable";
+
 export interface WordPressConnectorDeps {
   decodeCursor: (cursor?: string) => number;
   buildListPage: <T>(items: T[], total: number, offset: number, limit: number) => ListPage<T>;
@@ -45,6 +60,15 @@ export interface WordPressConnectorDeps {
   dispatchContentEditor: (input: DispatchContentEditorInput) => Promise<string>;
   /** Host-owned instance hard-delete (`@/lib/wordpress-api` deleteWordPressInstance). */
   deleteInstance: (id: string) => Promise<void>;
+  // ---- external-MCP toolbox surfaces (host-bound; consumed by src/mcp/toolbox.ts) ----
+  /** Configured WP instances (host `@/lib/wordpress-api` settings). */
+  listMcpInstances: () => WordPressMcpInstance[];
+  /** Cached mcp-adapter reachability probe for one instance (host-bound). */
+  probeMcpAdapter: (instance: WordPressMcpInstance) => Promise<WordPressMcpProbeStatus>;
+  /** Injectable MCP endpoint URL for a site (host owns the route constant). */
+  resolveMcpServerUrl: (siteUrl: string) => string;
+  /** True for private/local URLs external LLM providers cannot reach. */
+  isPrivateUrl: (url: string) => boolean;
 }
 
 const WORDPRESS_DEPS_KEY = Symbol.for("@cinatra-ai/wordpress-mcp-connector:host-deps/v1");

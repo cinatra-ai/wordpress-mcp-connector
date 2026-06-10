@@ -33,6 +33,7 @@
     "apiVersion": "cinatra.ai/v1",
     "kind": "connector",
     "displayName": "WordPress MCP",
+    "providesExternalMcpToolbox": true,
     "requestedHostPorts": [
       "nango"
     ],
