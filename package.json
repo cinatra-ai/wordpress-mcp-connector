@@ -12,7 +12,8 @@
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "scripts": {
-    "test": "vitest"
+    "test": "vitest",
+    "lint": "eslint . --no-inline-config"
   },
   "dependencies": {
     "@nangohq/frontend": "^0.70.3",
@@ -35,6 +36,11 @@
       "optional": true
     }
   },
+  "devDependencies": {
+    "@typescript-eslint/parser": "8.61.0",
+    "eslint": "10.4.1",
+    "typescript": "5.9.3"
+  },
   "cinatra": {
     "apiVersion": "cinatra.ai/v1",
     "kind": "connector",
@@ -53,16 +59,36 @@
       "subjectNoun": "post",
       "skillCapability": "widget-chat.wordpress-content-editor",
       "contextFields": [
-        { "key": "instanceId", "maxLength": 64 },
-        { "key": "postId", "maxLength": 32 },
-        { "key": "postType", "maxLength": 32 },
-        { "key": "postStatus", "maxLength": 32 },
-        { "key": "href", "maxLength": 500 }
+        {
+          "key": "instanceId",
+          "maxLength": 64
+        },
+        {
+          "key": "postId",
+          "maxLength": 32
+        },
+        {
+          "key": "postType",
+          "maxLength": 32
+        },
+        {
+          "key": "postStatus",
+          "maxLength": 32
+        },
+        {
+          "key": "href",
+          "maxLength": 500
+        }
       ],
       "auth": {
         "tokenConfigKey": "wordpress_widget_auth",
         "instancesConfigKey": "wordpress",
-        "requiredInstanceFields": ["id", "name", "username", "applicationPassword"]
+        "requiredInstanceFields": [
+          "id",
+          "name",
+          "username",
+          "applicationPassword"
+        ]
       }
     }
   }
