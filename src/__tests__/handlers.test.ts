@@ -1,54 +1,33 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
-// vi.hoisted runs BEFORE vi.mock factories execute (Vitest hoists factories).
-// All stubs that mock factories close over MUST be created via vi.hoisted.
-// Mock factories close over these stubs before test bodies run.
-const {
-  dispatchContentEditorMock,
-  updateWordPressPostMock,
-  listWordPressInstancesMock,
-} = vi.hoisted(() => ({
-  dispatchContentEditorMock: vi.fn(
-    async (_input: { agentUrl: string; payload: unknown; timeoutMs: number }) => "{}",
-  ),
-  updateWordPressPostMock: vi.fn(),
-  listWordPressInstancesMock: vi.fn(async () => [
-    {
-      id: "site-1",
-      siteUrl: "https://example.com",
-      username: "u",
-      applicationPassword: "p",
-      name: "Site 1",
-      createdAt: "",
-      updatedAt: "",
-    },
-  ]),
-}));
-
-vi.mock("@/lib/wordpress-api", () => ({
-  listWordPressInstances: listWordPressInstancesMock,
-  getWordPressAPIStatus: vi.fn(),
-  createWordPressDraft: vi.fn(),
-  readWordPressPost: vi.fn(),
-  readWordPressPostStatus: vi.fn(),
-  listPublishedWordPressPosts: vi.fn(),
-  deleteWordPressPost: vi.fn(),
-  uploadWordPressMedia: vi.fn(),
-  updateWordPressDraftMeta: vi.fn(),
-  updateWordPressPost: updateWordPressPostMock,
-}));
-
-import { updateWordPressDraftMeta } from "@/lib/wordpress-api";
 import { createWordPressPrimitiveHandlers } from "@cinatra-ai/wordpress-mcp-connector/mcp-handlers";
 import {
   registerWordPressConnector,
   _resetWordPressDepsForTests,
 } from "../deps";
 
-// The wordpress-content-editor A2A dispatch (client + bearer-token + history
-// walk) now lives HOST-SIDE behind `getWordPressDeps().dispatchContentEditor`.
-// Register a deps stub so the connector resolves it; the host owns the
-// `@cinatra-ai/a2a` + `@cinatra-ai/llm` edges (those are tested host-side).
+// All host surfaces resolve through the deps SLOT (cinatra#172 Stage H3): the
+// instance/status reads, the post/media content CRUD, the pagination helpers
+// and the content-editor A2A dispatch are host-bound members the suite stubs
+// via registerWordPressConnector — no `@/lib/*` mock (the host owns those
+// edges and tests them host-side).
+const dispatchContentEditorMock = vi.fn(
+  async (_input: { agentUrl: string; payload: unknown; timeoutMs: number }) => "{}",
+);
+const updatePostMock = vi.fn();
+const updateDraftMetaMock = vi.fn();
+const listMcpInstancesMock = vi.fn(() => [
+  {
+    id: "site-1",
+    siteUrl: "https://example.com",
+    username: "u",
+    applicationPassword: "p",
+    name: "Site 1",
+    createdAt: "",
+    updatedAt: "",
+  },
+]);
+
 function registerStubDeps() {
   registerWordPressConnector({
     decodeCursor: (cursor?: string) => (cursor ? Number(cursor) || 0 : 0),
@@ -59,11 +38,21 @@ function registerStubDeps() {
     }),
     dispatchContentEditor: dispatchContentEditorMock,
     deleteInstance: vi.fn(async () => {}),
-    // External-MCP toolbox surfaces (unused by this suite's code paths).
-    listMcpInstances: () => [],
+    // External-MCP toolbox + instance reads (the handlers' list-and-find).
+    listMcpInstances: listMcpInstancesMock,
     probeMcpAdapter: async () => "registered" as const,
     resolveMcpServerUrl: (siteUrl: string) => siteUrl,
     isPrivateUrl: () => false,
+    // Connection/instance-admin + content surface (cinatra#172 Stage H3).
+    getApiStatus: vi.fn(() => ({ status: "not_connected" as const, detail: "" })),
+    createDraft: vi.fn(),
+    readPost: vi.fn(),
+    readPostStatus: vi.fn(),
+    listPublishedPosts: vi.fn(async () => ({ items: [], total: 0 })),
+    deletePost: vi.fn(async () => ({ deleted: true })),
+    uploadMedia: vi.fn(),
+    updateDraftMeta: updateDraftMetaMock,
+    updatePost: updatePostMock,
   });
 }
 
@@ -199,9 +188,11 @@ describe("wordpress_content_editor_run", () => {
 describe("wordpress_post_update", () => {
   let handlers: ReturnType<typeof createWordPressPrimitiveHandlers>;
   beforeEach(() => {
+    _resetWordPressDepsForTests();
+    registerStubDeps();
     handlers = createWordPressPrimitiveHandlers();
-    updateWordPressPostMock.mockReset();
-    updateWordPressPostMock.mockResolvedValue({ id: 10, status: "draft" });
+    updatePostMock.mockReset();
+    updatePostMock.mockResolvedValue({ id: 10, status: "draft" });
   });
 
   it("is registered as a handler key on createWordPressPrimitiveHandlers()", () => {
@@ -239,14 +230,14 @@ describe("wordpress_post_update", () => {
       actor: { actorType: "model", source: "agent" },
       mode: "agentic",
     });
-    expect(updateWordPressPostMock).toHaveBeenCalledWith(
+    expect(updatePostMock).toHaveBeenCalledWith(
       expect.objectContaining({
         wordpressPostId: 10,
         fields: expect.objectContaining({ title: "Hello" }),
       }),
     );
     // Defensive: title should NOT be inside meta
-    const call = updateWordPressPostMock.mock.calls[0][0];
+    const call = updatePostMock.mock.calls[0][0];
     expect(call.fields.meta?.title).toBeUndefined();
   });
 
@@ -257,7 +248,7 @@ describe("wordpress_post_update", () => {
       actor: { actorType: "model", source: "agent" },
       mode: "agentic",
     });
-    const call = updateWordPressPostMock.mock.calls[0][0];
+    const call = updatePostMock.mock.calls[0][0];
     expect(call.fields).toEqual({ status: "draft", title: "X", content: "Y" });
   });
 
@@ -268,7 +259,7 @@ describe("wordpress_post_update", () => {
       actor: { actorType: "model", source: "agent" },
       mode: "agentic",
     });
-    const call = updateWordPressPostMock.mock.calls[0][0];
+    const call = updatePostMock.mock.calls[0][0];
     expect(call.wordpressPostId).toBe(10);  // numeric, not string
   });
 });
@@ -283,9 +274,11 @@ describe("wordpress_post_update_meta empty-field guard", () => {
   let handlers: ReturnType<typeof createWordPressPrimitiveHandlers>;
 
   beforeEach(() => {
+    _resetWordPressDepsForTests();
+    registerStubDeps();
     handlers = createWordPressPrimitiveHandlers();
-    vi.mocked(updateWordPressDraftMeta).mockReset();
-    vi.mocked(updateWordPressDraftMeta).mockResolvedValue({ ok: true } as any);
+    updateDraftMetaMock.mockReset();
+    updateDraftMetaMock.mockResolvedValue({ ok: true } as any);
   });
 
   it("wordpress_post_update_meta strips empty-string meta values before dispatch", async () => {
@@ -303,7 +296,7 @@ describe("wordpress_post_update_meta empty-field guard", () => {
       mode: "agentic",
     });
 
-    const call = vi.mocked(updateWordPressDraftMeta).mock.calls[0][0] as {
+    const call = updateDraftMetaMock.mock.calls[0][0] as {
       instance: unknown;
       wordpressPostId: number;
       meta: Record<string, unknown>;
@@ -340,7 +333,7 @@ describe("wordpress_post_update_meta empty-field guard", () => {
       mode: "agentic",
     });
 
-    const call = vi.mocked(updateWordPressDraftMeta).mock.calls[0][0] as {
+    const call = updateDraftMetaMock.mock.calls[0][0] as {
       wordpressPostId: number;
       meta: Record<string, unknown>;
     };
@@ -375,6 +368,6 @@ describe("wordpress_post_update_meta empty-field guard", () => {
       }),
     ).rejects.toThrow(/all submitted meta values were empty/i);
 
-    expect(vi.mocked(updateWordPressDraftMeta)).not.toHaveBeenCalled();
+    expect(updateDraftMetaMock).not.toHaveBeenCalled();
   });
 });

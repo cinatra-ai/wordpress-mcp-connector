@@ -9,28 +9,6 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 //   W4: Missing context fields default to "" (no undefined leakage).
 //   W5: Handler return shape { postId, changes } passes back from execute() unchanged.
 
-vi.mock("@/lib/wordpress-api", () => ({
-  listWordPressInstances: vi.fn(async () => [
-    {
-      id: "wp-1",
-      name: "WP 1",
-      siteUrl: "http://localhost:8081",
-      apiKey: "k",
-      createdAt: "2026-01-01T00:00:00Z",
-      updatedAt: "2026-01-01T00:00:00Z",
-    },
-  ]),
-  getWordPressAPIStatus: vi.fn(),
-  createWordPressDraft: vi.fn(),
-  readWordPressPost: vi.fn(),
-  readWordPressPostStatus: vi.fn(),
-  listPublishedWordPressPosts: vi.fn(),
-  deleteWordPressPost: vi.fn(),
-  uploadWordPressMedia: vi.fn(),
-  updateWordPressDraftMeta: vi.fn(),
-  updateWordPressPost: vi.fn(),
-}));
-
 import { createWordPressWidgetChatTool } from "../widget-chat-tool";
 import {
   registerWordPressConnector,
@@ -56,6 +34,17 @@ function registerStubDeps() {
     probeMcpAdapter: async () => "registered" as const,
     resolveMcpServerUrl: (siteUrl: string) => siteUrl,
     isPrivateUrl: () => false,
+    // Connection/instance-admin + content surface (cinatra#172 Stage H3 —
+    // unused by this suite's code paths).
+    getApiStatus: () => ({ status: "not_connected" as const, detail: "" }),
+    createDraft: vi.fn(),
+    readPost: vi.fn(),
+    readPostStatus: vi.fn(),
+    listPublishedPosts: vi.fn(async () => ({ items: [], total: 0 })),
+    deletePost: vi.fn(async () => ({ deleted: true })),
+    uploadMedia: vi.fn(),
+    updateDraftMeta: vi.fn(),
+    updatePost: vi.fn(),
   });
 }
 

@@ -1,12 +1,20 @@
-// `register(ctx)` shape — the Stage 3 transport-DI inversion: the connector
-// binds its host deps slot itself (always-bind since the post-cutover sweep, lazy per-call
-// host-service resolution). Leaf-graph pin: the entry imports ONLY ./deps.
+// `register(ctx)` shape — the Stage 3 transport-DI inversion plus the
+// cinatra#172 Stage H3 extension: the connector binds its host deps slot
+// itself (always-bind since the post-cutover sweep, lazy per-call
+// host-service resolution) over mcp-pagination, content-editor-dispatch, the
+// EXTENDED `@cinatra-ai/host:wordpress-mcp` (connection/instance-admin reads)
+// and the NEW `@cinatra-ai/host:wordpress-content` (post/media CRUD).
+// Leaf-graph pin: the entry imports ONLY ./deps. Slot-timing coverage
+// (cinatra#172 finding 8): the slot is populated AT ACTIVATION — before the
+// settings page / MCP handlers resolve it — and an unbound slot fails LOUD
+// naming the package and the registration step.
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 import { register } from "../register";
 import {
   getWordPressDeps,
+  listInstancesSorted,
   registerWordPressConnector,
   _resetWordPressDepsForTests,
 } from "../deps";
@@ -58,6 +66,108 @@ describe("register(ctx) — transport-DI deps binding (Stage 3)", () => {
     expect(sentinel).not.toHaveBeenCalled();
   });
 
+  it("binds the connection-admin + content members LAZILY against wordpress-mcp AND wordpress-content (cinatra#172 Stage H3)", async () => {
+    const getAPIStatus = vi.fn(() => ({ status: "connected" as const, detail: "1 instance" }));
+    const createDraft = vi.fn(async () => ({ wordpressPostId: 10, adminUrl: "a" }));
+    const readPost = vi.fn(async () => ({
+      id: 10, status: "draft", title: "T", content: "C", excerpt: "E", adminUrl: "a",
+    }));
+    const readPostStatus = vi.fn(async () => ({ id: 10, status: "draft", adminUrl: "a" }));
+    const listPublishedPosts = vi.fn(async () => ({ items: [], total: 0 }));
+    const deletePost = vi.fn(async () => ({ deleted: true }));
+    const uploadMedia = vi.fn(async () => ({ mediaId: 7 }));
+    const updateDraftMeta = vi.fn(async () => ({ id: 10 }));
+    const updatePost = vi.fn(async () => ({
+      id: 10, status: "draft", title: "T", content: "C", excerpt: "E", adminUrl: "a",
+    }));
+    const { resolveProviders } = activateWithServices({
+      "@cinatra-ai/host:wordpress-mcp": {
+        listInstances: vi.fn(() => []),
+        probeAdapter: vi.fn(),
+        resolveServerUrl: vi.fn(),
+        isPrivateUrl: vi.fn(),
+        deleteInstance: vi.fn(),
+        getAPIStatus,
+      },
+      "@cinatra-ai/host:wordpress-content": {
+        createDraft,
+        readPost,
+        readPostStatus,
+        listPublishedPosts,
+        deletePost,
+        uploadMedia,
+        updateDraftMeta,
+        updatePost,
+      },
+    });
+    // Slot bound at activation, BEFORE any settings-page render / MCP handler
+    // resolves it — and with NO host-service resolution yet (probe-safe).
+    expect(resolveProviders).not.toHaveBeenCalled();
+
+    expect(getWordPressDeps().getApiStatus()).toEqual({ status: "connected", detail: "1 instance" });
+
+    const instance = { id: "wp-1", name: "S", siteUrl: "https://wp.example", username: "u", applicationPassword: "p" };
+    const payload = { title: "T", content: "C", excerpt: "", status: "draft" as const };
+    await expect(getWordPressDeps().createDraft({ instance, payload })).resolves.toMatchObject({
+      wordpressPostId: 10,
+    });
+    expect(createDraft).toHaveBeenCalledWith({ instance, payload });
+
+    await expect(
+      getWordPressDeps().readPost({ instance, wordpressPostId: 10, postType: "page" }),
+    ).resolves.toMatchObject({ id: 10 });
+    expect(readPost).toHaveBeenCalledWith({ instance, wordpressPostId: 10, postType: "page" });
+
+    await expect(getWordPressDeps().readPostStatus({ instance, wordpressPostId: 10 })).resolves.toEqual({
+      id: 10,
+      status: "draft",
+      adminUrl: "a",
+    });
+
+    await expect(
+      getWordPressDeps().listPublishedPosts(instance, { offset: 0, limit: 10 }),
+    ).resolves.toEqual({ items: [], total: 0 });
+    expect(listPublishedPosts).toHaveBeenCalledWith(instance, { offset: 0, limit: 10 });
+
+    await expect(getWordPressDeps().deletePost({ instance, wordpressPostId: 10 })).resolves.toEqual({
+      deleted: true,
+    });
+
+    const media = { instance, imageBase64: "QUJD", imageMimeType: "image/png", title: "img" };
+    await expect(getWordPressDeps().uploadMedia(media)).resolves.toEqual({ mediaId: 7 });
+    expect(uploadMedia).toHaveBeenCalledWith(media);
+
+    await expect(
+      getWordPressDeps().updateDraftMeta({ instance, wordpressPostId: 10, meta: { k: "v" } }),
+    ).resolves.toEqual({ id: 10 });
+
+    const fields = { title: "X", status: "draft" as const };
+    await expect(
+      getWordPressDeps().updatePost({ instance, wordpressPostId: 10, fields }),
+    ).resolves.toMatchObject({ id: 10 });
+    expect(updatePost).toHaveBeenCalledWith({ instance, wordpressPostId: 10, fields });
+
+    expect(getAPIStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("listInstancesSorted orders most-recently-updated first (host listWordPressInstances ordering)", () => {
+    activateWithServices({
+      "@cinatra-ai/host:wordpress-mcp": {
+        listInstances: () => [
+          { id: "old", updatedAt: "2026-01-01T00:00:00Z" },
+          { id: "new", updatedAt: "2026-03-01T00:00:00Z" },
+          { id: "mid", updatedAt: "2026-02-01T00:00:00Z" },
+        ],
+        probeAdapter: vi.fn(),
+        resolveServerUrl: vi.fn(),
+        isPrivateUrl: vi.fn(),
+        deleteInstance: vi.fn(),
+        getAPIStatus: vi.fn(),
+      },
+    });
+    expect(listInstancesSorted().map((i) => i.id)).toEqual(["new", "mid", "old"]);
+  });
+
   it("fails LOUD (descriptive) on a missing host service at call time", () => {
     activateWithServices({});
     expect(() => getWordPressDeps().listMcpInstances()).toThrow(
@@ -65,6 +175,26 @@ describe("register(ctx) — transport-DI deps binding (Stage 3)", () => {
     );
     expect(() => getWordPressDeps().decodeCursor("x")).toThrow(
       /host service "@cinatra-ai\/host:mcp-pagination" is not registered/,
+    );
+    // The connection-admin read rides the same wordpress-mcp service (H3)…
+    expect(() => getWordPressDeps().getApiStatus()).toThrow(
+      /host service "@cinatra-ai\/host:wordpress-mcp" is not registered/,
+    );
+    // …while the content CRUD rides the SEPARATE wordpress-content service.
+    expect(() =>
+      getWordPressDeps().createDraft({
+        instance: { id: "i", name: "n", siteUrl: "s", username: "u", applicationPassword: "p" },
+        payload: { title: "", content: "", excerpt: "", status: "draft" },
+      }),
+    ).toThrow(/host service "@cinatra-ai\/host:wordpress-content" is not registered/);
+  });
+
+  it("fails LOUD with the package name + registration step when the SLOT itself is unbound", () => {
+    // No register(ctx) ran at all (e.g. a settings-page bundle resolving the
+    // slot before activation): the getter must name the package and the
+    // missing registration step.
+    expect(() => getWordPressDeps()).toThrow(
+      /@cinatra-ai\/wordpress-mcp-connector: host runtime deps not registered[\s\S]*registerWordPressConnector/,
     );
   });
 });

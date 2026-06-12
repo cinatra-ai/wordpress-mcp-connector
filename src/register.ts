@@ -4,9 +4,10 @@
 // imports `registerWordPressConnector` — this entry binds the connector's
 // host deps AT ACTIVATION by adapting the per-concern host services published
 // in the capability registry (`@cinatra-ai/host:*` — mcp-pagination,
-// content-editor-dispatch, wordpress-mcp). Every adapter member resolves its
-// host service LAZILY at call time, so activation order against the host's
-// boot imports never matters.
+// content-editor-dispatch, wordpress-mcp, and — cinatra#172 Stage H3 — the
+// post/media content surface wordpress-content). Every adapter member resolves
+// its host service LAZILY at call time, so activation order against the
+// host's boot imports never matters.
 //
 // Registration-only (no I/O) — safe under required-extension-activation's
 // prod-boot arming, and probe-safe (the hot-update probe's `resolveProviders`
@@ -40,6 +41,21 @@ type HostWordPressMcpShape = {
   resolveServerUrl: WordPressConnectorDeps["resolveMcpServerUrl"];
   isPrivateUrl: WordPressConnectorDeps["isPrivateUrl"];
   deleteInstance: WordPressConnectorDeps["deleteInstance"];
+  // Connection/instance-admin read (cinatra#172 Stage H3).
+  getAPIStatus: WordPressConnectorDeps["getApiStatus"];
+};
+// Post/media content surface (cinatra#172 Stage H3) — the host publishes it
+// under a SEPARATE capability id from the connection-focused wordpress-mcp
+// service so connection admin and content CRUD never evolve under one id.
+type HostWordPressContentShape = {
+  createDraft: WordPressConnectorDeps["createDraft"];
+  readPost: WordPressConnectorDeps["readPost"];
+  readPostStatus: WordPressConnectorDeps["readPostStatus"];
+  listPublishedPosts: WordPressConnectorDeps["listPublishedPosts"];
+  deletePost: WordPressConnectorDeps["deletePost"];
+  uploadMedia: WordPressConnectorDeps["uploadMedia"];
+  updateDraftMeta: WordPressConnectorDeps["updateDraftMeta"];
+  updatePost: WordPressConnectorDeps["updatePost"];
 };
 
 /** Lazy per-concern host-service resolution (fail-loud on a missing service —
@@ -63,6 +79,8 @@ function buildHostBoundDeps(ctx: ExtensionHostContext): WordPressConnectorDeps {
   const contentEditor = () =>
     hostService<HostContentEditorDispatchShape>(ctx, "@cinatra-ai/host:content-editor-dispatch");
   const wordpressMcp = () => hostService<HostWordPressMcpShape>(ctx, "@cinatra-ai/host:wordpress-mcp");
+  const wordpressContent = () =>
+    hostService<HostWordPressContentShape>(ctx, "@cinatra-ai/host:wordpress-content");
   return {
     decodeCursor: (cursor) => pagination().decodeCursor(cursor),
     buildListPage: <T,>(items: T[], total: number, offset: number, limit: number) =>
@@ -73,6 +91,19 @@ function buildHostBoundDeps(ctx: ExtensionHostContext): WordPressConnectorDeps {
     probeMcpAdapter: (instance) => wordpressMcp().probeAdapter(instance),
     resolveMcpServerUrl: (siteUrl) => wordpressMcp().resolveServerUrl(siteUrl),
     isPrivateUrl: (url) => wordpressMcp().isPrivateUrl(url),
+    // Connection/instance-admin read (cinatra#172 Stage H3).
+    getApiStatus: () => wordpressMcp().getAPIStatus(),
+    // Post/media content surface (cinatra#172 Stage H3). The WRITERS are only
+    // ever reached through the host's MCP dispatch + actor gating (see the
+    // host service's TRUST note; posture identical to the static imports).
+    createDraft: (input) => wordpressContent().createDraft(input),
+    readPost: (input) => wordpressContent().readPost(input),
+    readPostStatus: (input) => wordpressContent().readPostStatus(input),
+    listPublishedPosts: (instance, options) => wordpressContent().listPublishedPosts(instance, options),
+    deletePost: (input) => wordpressContent().deletePost(input),
+    uploadMedia: (input) => wordpressContent().uploadMedia(input),
+    updateDraftMeta: (input) => wordpressContent().updateDraftMeta(input),
+    updatePost: (input) => wordpressContent().updatePost(input),
   };
 }
 

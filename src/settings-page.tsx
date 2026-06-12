@@ -3,7 +3,10 @@ import type { ExtensionHostContext } from "@cinatra-ai/sdk-extensions";
 import { Button } from "./components/ui/button";
 import { Badge } from "./components/ui/badge";
 import { Main, PageHeader, PageContent } from "@cinatra-ai/sdk-ui/marketplace";
-import { getWordPressAPIStatus, listWordPressInstances } from "@/lib/wordpress-api";
+// Instance/status reads come from the host-bound deps slot (the extended
+// `@cinatra-ai/host:wordpress-mcp` service) — no `@/lib/wordpress-api` import
+// (cinatra#172 Stage H3).
+import { getWordPressDeps, listInstancesSorted } from "./deps";
 import { deleteWordPressInstanceAction } from "./setup-actions";
 import { WordPressNangoConnectCard } from "./wordpress-nango-connect-card";
 
@@ -16,10 +19,8 @@ export async function WordPressSettingsPage(props: {
   ctx: ExtensionHostContext;
 }) {
   const { ctx } = props;
-  const [instances, status] = await Promise.all([
-    listWordPressInstances(),
-    Promise.resolve(getWordPressAPIStatus()),
-  ]);
+  const instances = listInstancesSorted();
+  const status = getWordPressDeps().getApiStatus();
   const nangoFrontendConfig = (await ctx.nango.getFrontendConfig?.()) ?? {};
   const nangoStatus = (await ctx.nango.getStatus?.()) ?? { status: "not_connected" as const };
 

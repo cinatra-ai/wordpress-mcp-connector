@@ -1,19 +1,11 @@
 import { z } from "zod";
 import type { ExtensionPrimitiveRequest } from "@cinatra-ai/sdk-extensions";
-import {
-  listWordPressInstances,
-  getWordPressAPIStatus,
-  createWordPressDraft,
-  readWordPressPost,
-  readWordPressPostStatus,
-  listPublishedWordPressPosts,
-  deleteWordPressPost,
-  uploadWordPressMedia,
-  updateWordPressDraftMeta,
-  updateWordPressPost, // top-level WordPress post updates
-} from "@/lib/wordpress-api";
-// Host pagination helpers are provided via DI instead of importing app-local modules.
-import { getWordPressDeps } from "../deps";
+// Every host surface arrives through the host-bound deps slot (cinatra#172
+// Stage H3): instance/status reads from the extended
+// `@cinatra-ai/host:wordpress-mcp` service, the post/media CRUD from the NEW
+// `@cinatra-ai/host:wordpress-content` service, pagination from
+// `@cinatra-ai/host:mcp-pagination` — no `@/lib/wordpress-api` import.
+import { getWordPressDeps, listInstancesSorted } from "../deps";
 
 // Strip Markdown code fences from LLM-emitted JSON before parse. The
 // wayflow-wordpress-content-editor agent's LLM occasionally wraps its JSON
@@ -98,19 +90,19 @@ export const postUpdateSchema = z
 export function createWordPressPrimitiveHandlers() {
   return {
     "wordpress_status": async (_request: ExtensionPrimitiveRequest<unknown>) => {
-      return getWordPressAPIStatus();
+      return getWordPressDeps().getApiStatus();
     },
 
     "wordpress_instances_list": async (_request: ExtensionPrimitiveRequest<unknown>) => {
-      return listWordPressInstances();
+      return listInstancesSorted();
     },
 
     "wordpress_post_create_draft": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const input = createDraftSchema.parse(request.input);
-      const instances = await listWordPressInstances();
+      const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === input.instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
-      return createWordPressDraft({
+      return getWordPressDeps().createDraft({
         instance,
         payload: { title: input.title, content: input.content, excerpt: input.excerpt, status: "draft" },
       });
@@ -118,37 +110,37 @@ export function createWordPressPrimitiveHandlers() {
 
     "wordpress_post_status": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const input = postStatusSchema.parse(request.input);
-      const instances = await listWordPressInstances();
+      const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === input.instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
-      return readWordPressPostStatus({ instance, wordpressPostId: input.postId });
+      return getWordPressDeps().readPostStatus({ instance, wordpressPostId: input.postId });
     },
 
     "wordpress_post_delete": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const input = postStatusSchema.parse(request.input);
-      const instances = await listWordPressInstances();
+      const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === input.instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
-      await deleteWordPressPost({ instance, wordpressPostId: input.postId });
+      await getWordPressDeps().deletePost({ instance, wordpressPostId: input.postId });
       return { ok: true };
     },
 
     "wordpress_media_upload": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const { instanceId, ...rest } = uploadMediaSchema.parse(request.input);
-      const instances = await listWordPressInstances();
+      const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
-      return uploadWordPressMedia({ instance, ...rest });
+      return getWordPressDeps().uploadMedia({ instance, ...rest });
     },
 
     "wordpress_posts_list": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const { instanceId, cursor } = postsListSchema.parse(request.input);
-      const instances = await listWordPressInstances();
+      const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
       const offset = getWordPressDeps().decodeCursor(cursor);
       const limit = 10;
-      const { items, total } = await listPublishedWordPressPosts(instance, { offset, limit });
+      const { items, total } = await getWordPressDeps().listPublishedPosts(instance, { offset, limit });
       return getWordPressDeps().buildListPage(items, total, offset, limit);
     },
 
@@ -157,26 +149,26 @@ export function createWordPressPrimitiveHandlers() {
     // Routes to the IDENTICAL handler logic as wordpress_posts_list.
     "wordpress_post_get_latest": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const { instanceId, cursor } = postsListSchema.parse(request.input);
-      const instances = await listWordPressInstances();
+      const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
       const offset = getWordPressDeps().decodeCursor(cursor);
       const limit = 10;
-      const { items, total } = await listPublishedWordPressPosts(instance, { offset, limit });
+      const { items, total } = await getWordPressDeps().listPublishedPosts(instance, { offset, limit });
       return getWordPressDeps().buildListPage(items, total, offset, limit);
     },
 
     "wordpress_post_get": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const { instanceId, postId, postType } = postStatusSchema.parse(request.input);
-      const instances = await listWordPressInstances();
+      const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
-      return readWordPressPost({ instance, wordpressPostId: postId, postType });
+      return getWordPressDeps().readPost({ instance, wordpressPostId: postId, postType });
     },
 
     "wordpress_post_update_meta": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const { instanceId, postId, meta } = updateMetaSchema.parse(request.input);
-      const instances = await listWordPressInstances();
+      const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
       // Distinguish "no fields supplied" from "all fields stripped".
@@ -198,7 +190,7 @@ export function createWordPressPrimitiveHandlers() {
       if (Object.keys(safeMeta).length === 0) {
         throw new Error("All submitted meta values were empty strings — nothing to update.");
       }
-      return updateWordPressDraftMeta({ instance, wordpressPostId: postId, meta: safeMeta });
+      return getWordPressDeps().updateDraftMeta({ instance, wordpressPostId: postId, meta: safeMeta });
     },
 
     // Top-level WordPress post update.
@@ -208,10 +200,10 @@ export function createWordPressPrimitiveHandlers() {
     // existing wordpress_post_update_meta is preserved for meta-only writes.
     "wordpress_post_update": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const input = postUpdateSchema.parse(request.input);
-      const instances = await listWordPressInstances();
+      const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === input.instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
-      return updateWordPressPost({
+      return getWordPressDeps().updatePost({
         instance,
         wordpressPostId: input.postId,
         postType: input.postType,
