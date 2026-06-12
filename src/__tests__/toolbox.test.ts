@@ -41,6 +41,17 @@ beforeEach(() => {
     resolveMcpServerUrl: (siteUrl: string) =>
       `${siteUrl.replace(/\/+$/, "")}/index.php?rest_route=/mcp/mcp-adapter-default-server`,
     isPrivateUrl: (url: string) => /localhost|127\.0\.0\.1|::1/.test(url),
+    // Connection/instance-admin + content surface (cinatra#172 Stage H3 —
+    // unused by the toolbox's code paths).
+    getApiStatus: () => ({ status: "not_connected" as const, detail: "" }),
+    createDraft: vi.fn(),
+    readPost: vi.fn(),
+    readPostStatus: vi.fn(),
+    listPublishedPosts: vi.fn(async () => ({ items: [], total: 0 })),
+    deletePost: vi.fn(async () => ({ deleted: true })),
+    uploadMedia: vi.fn(),
+    updateDraftMeta: vi.fn(),
+    updatePost: vi.fn(),
   });
 });
 
