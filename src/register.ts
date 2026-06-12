@@ -6,10 +6,7 @@
 // in the capability registry (`@cinatra-ai/host:*` — mcp-pagination,
 // content-editor-dispatch, wordpress-mcp). Every adapter member resolves its
 // host service LAZILY at call time, so activation order against the host's
-// boot imports never matters. Bind-if-absent skew guard: on a host that
-// still binds the deps statically at boot (pre-cutover), the host's eager
-// binding wins; the guard is swept once every host the connector can meet is
-// post-cutover.
+// boot imports never matters.
 //
 // Registration-only (no I/O) — safe under required-extension-activation's
 // prod-boot arming, and probe-safe (the hot-update probe's `resolveProviders`
@@ -24,7 +21,7 @@
 // meet during skew.
 
 import type { ExtensionHostContext } from "@cinatra-ai/sdk-extensions";
-import { hasWordPressDeps, registerWordPressConnector, type WordPressConnectorDeps } from "./deps";
+import { registerWordPressConnector, type WordPressConnectorDeps } from "./deps";
 
 const PACKAGE_NAME = "@cinatra-ai/wordpress-mcp-connector";
 
@@ -80,9 +77,10 @@ function buildHostBoundDeps(ctx: ExtensionHostContext): WordPressConnectorDeps {
 }
 
 export function register(ctx: ExtensionHostContext): void {
-  // Transport-DI inversion: bind the host deps slot UNLESS a pre-cutover host
-  // already bound it statically at boot (bind-if-absent skew guard).
-  if (!hasWordPressDeps()) {
-    registerWordPressConnector(buildHostBoundDeps(ctx));
-  }
+  // Transport-DI inversion: bind the host deps slot. Always-bind (the
+  // bind-if-absent skew guard was swept once every host this connector can
+  // meet is post-cutover): re-activation — incl. a hot-update digest swap —
+  // re-binds fresh lazy resolvers, so a stale deps object can never outlive
+  // its digest.
+  registerWordPressConnector(buildHostBoundDeps(ctx));
 }
