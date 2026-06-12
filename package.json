@@ -46,8 +46,10 @@
     "kind": "connector",
     "displayName": "WordPress MCP",
     "providesExternalMcpToolbox": true,
+    "serverEntry": "./register",
     "requestedHostPorts": [
-      "nango"
+      "nango",
+      "capabilities"
     ],
     "dependencies": [],
     "capabilities": {

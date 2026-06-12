@@ -76,11 +76,23 @@ type DepsHolder = { [k: symbol]: WordPressConnectorDeps | null | undefined };
 const _holder = globalThis as unknown as DepsHolder;
 
 /**
- * Wire the host's runtime deps. Called once at boot
- * (src/lib/register-transport-connectors.ts). Re-calling replaces — tests swap stubs.
+ * Wire the runtime deps. Bound by the connector's own `register(ctx)` at
+ * activation (transport-DI inversion, cinatra#151 Stage 3) — and, on hosts
+ * that predate the cutover, statically at boot by the host's transport
+ * binder. Re-calling replaces — tests swap stubs.
  */
 export function registerWordPressConnector(deps: WordPressConnectorDeps): void {
   _holder[WORDPRESS_DEPS_KEY] = deps;
+}
+
+/** True when the host runtime deps are already bound. Read by the
+ * `register(ctx)` bind-if-absent skew guard (src/register.ts): on a host that
+ * still binds deps statically at boot (pre transport-DI cutover) the host's
+ * eager binding wins; on a cutover host nothing else binds, so register(ctx)
+ * binds the lazy capability-resolving deps. Swept once every host the
+ * connector can meet is post-cutover. */
+export function hasWordPressDeps(): boolean {
+  return _holder[WORDPRESS_DEPS_KEY] != null;
 }
 
 export function getWordPressDeps(): WordPressConnectorDeps {
