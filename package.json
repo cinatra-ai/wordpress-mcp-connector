@@ -68,6 +68,7 @@
     },
     "widgetStream": {
       "agentSlug": "wordpress-content-editor",
+      "relayAgentPackage": "@cinatra-ai/wordpress-agent",
       "label": "WordPress",
       "subjectNoun": "post",
       "skillCapability": "widget-chat.wordpress-content-editor",
