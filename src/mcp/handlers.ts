@@ -230,12 +230,17 @@ export function createWordPressPrimitiveHandlers() {
       const input = contentEditorRunSchema.parse(request.input);
 
       const agentUrl =
-        process.env.WP_CONTENT_EDITOR_A2A_URL ?? "http://localhost:3021";
+        process.env.WP_CONTENT_EDITOR_A2A_URL ??
+        "http://localhost:3010/agents/cinatra-ai/wordpress-agent";
 
       const text = await getWordPressDeps().dispatchContentEditor({
         agentUrl,
         payload: input,
         timeoutMs: 300_000, // aligned with /chat blocking budget
+        // cinatra#246: lets the host resolve the agent template + pre-create the
+        // OBO agent_run so the CMS write authorizes via the production agent-run
+        // OBO path (not the dev-admin bypass).
+        packageName: "@cinatra-ai/wordpress-agent",
       });
 
       // Strip code fences before JSON.parse.
