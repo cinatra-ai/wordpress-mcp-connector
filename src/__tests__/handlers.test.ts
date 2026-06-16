@@ -12,7 +12,12 @@ import {
 // via registerWordPressConnector — no `@/lib/*` mock (the host owns those
 // edges and tests them host-side).
 const dispatchContentEditorMock = vi.fn(
-  async (_input: { agentUrl: string; payload: unknown; timeoutMs: number }) => "{}",
+  async (_input: {
+    agentUrl: string;
+    payload: unknown;
+    timeoutMs: number;
+    packageName: string;
+  }) => "{}",
 );
 const updatePostMock = vi.fn();
 const updateDraftMetaMock = vi.fn();
@@ -112,6 +117,8 @@ describe("wordpress_content_editor_run", () => {
       expect.objectContaining({
         agentUrl: "http://localhost:3021",
         timeoutMs: 300_000,
+        // cinatra#246: agent package name drives host-side OBO run creation.
+        packageName: "@cinatra-ai/wordpress-agent",
       }),
     );
   });

@@ -36,6 +36,14 @@ export type DispatchContentEditorInput = {
   payload: unknown;
   /** Blocking budget (ms); aligned with the /chat blocking budget (300_000). */
   timeoutMs: number;
+  /**
+   * npm package name of the content-editor agent (cinatra#246). The host uses
+   * it to resolve the agent template and pre-create a real `agent_run` row
+   * bound to the deployment's identity, so the downstream `/api/mcp` CMS write
+   * is authorized through the production agent-run OBO path (not the dev-admin
+   * bypass). Always `@cinatra-ai/wordpress-agent` for this connector.
+   */
+  packageName: string;
 };
 
 /**
