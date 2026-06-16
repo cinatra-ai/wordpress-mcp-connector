@@ -230,7 +230,8 @@ export function createWordPressPrimitiveHandlers() {
       const input = contentEditorRunSchema.parse(request.input);
 
       const agentUrl =
-        process.env.WP_CONTENT_EDITOR_A2A_URL ?? "http://localhost:3021";
+        process.env.WP_CONTENT_EDITOR_A2A_URL ??
+        "http://localhost:3010/agents/cinatra-ai/wordpress-agent";
 
       const text = await getWordPressDeps().dispatchContentEditor({
         agentUrl,

@@ -100,7 +100,7 @@ describe("wordpress_content_editor_run", () => {
     expect((dispatchCall.payload as { postId: unknown }).postId).toBe(10);
   });
 
-  it("dispatches via deps.dispatchContentEditor with default localhost:3021 and timeout 300_000", async () => {
+  it("dispatches via deps.dispatchContentEditor with default :3010 agent route and timeout 300_000", async () => {
     await (handlers as any).wordpress_content_editor_run({
       primitiveName: "wordpress_content_editor_run",
       input: {
@@ -115,7 +115,7 @@ describe("wordpress_content_editor_run", () => {
     });
     expect(dispatchContentEditorMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        agentUrl: "http://localhost:3021",
+        agentUrl: "http://localhost:3010/agents/cinatra-ai/wordpress-agent",
         timeoutMs: 300_000,
         // cinatra#246: agent package name drives host-side OBO run creation.
         packageName: "@cinatra-ai/wordpress-agent",
