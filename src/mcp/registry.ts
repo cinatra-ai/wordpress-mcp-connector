@@ -71,6 +71,14 @@ export function registerWordPressPrimitives(server: ExtensionMcpToolServer) {
   const handlers = createWordPressPrimitiveHandlers();
 
   for (const [name, handler] of Object.entries(handlers)) {
+    // cinatra#246: NEVER expose the content-editor RELAY as an MCP tool. It is
+    // a dispatch primitive (it sends an A2A task to the wordpress-content-editor
+    // agent), not a CMS read/write capability. When the leaf agent has the
+    // cinatra MCP server injected it would otherwise see `wordpress_content_editor_run`
+    // in tools/list and call it — re-dispatching itself (observed: recursive
+    // mcp_call -> 504). The host relays to the agent directly via
+    // dispatchContentEditorViaA2A; this name must not be a model-visible tool.
+    if (name === "wordpress_content_editor_run") continue;
     const meta = TOOL_META[name] ?? { description: name, inputSchema: z.object({}).passthrough() };
     server.registerTool(
       name,
