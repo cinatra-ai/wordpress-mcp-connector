@@ -52,6 +52,8 @@ beforeEach(() => {
     uploadMedia: vi.fn(),
     updateDraftMeta: vi.fn(),
     updatePost: vi.fn(),
+    // cinatra#409 write-authority gate — unused by the toolbox's read-only paths.
+    requireInstanceWriteAuthority: vi.fn(async () => {}),
   });
 });
 

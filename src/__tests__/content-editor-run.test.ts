@@ -40,6 +40,9 @@ function registerStubDeps() {
     uploadMedia: vi.fn(),
     updateDraftMeta: vi.fn(),
     updatePost: vi.fn(),
+    // cinatra#409 write-authority gate — unused by the relay suite's code paths
+    // (wordpress_content_editor_run is a DISPATCH relay, not a direct writer).
+    requireInstanceWriteAuthority: vi.fn(async () => {}),
   });
 }
 

@@ -150,6 +150,41 @@ describe("register(ctx) — transport-DI deps binding (Stage 3)", () => {
     expect(getAPIStatus).toHaveBeenCalledTimes(1);
   });
 
+  it("requireInstanceWriteAuthority binds the host instance-write-authority service for KIND 'wordpress' and forwards only instanceId+primitiveName (cinatra#409)", async () => {
+    const requireWrite = vi.fn(async () => {});
+    const selectForConnector = vi.fn((_kind: string) => ({ requireWrite }));
+    activateWithServices({
+      // The REAL host capability id + shape (HostInstanceWriteAuthorityService):
+      // selectForConnector(kind).requireWrite({ instanceId, primitiveName }).
+      "@cinatra-ai/host:instance-write-authority": { selectForConnector },
+    });
+    await expect(
+      getWordPressDeps().requireInstanceWriteAuthority({
+        instanceId: "wp-1",
+        primitiveName: "wordpress_post_update",
+      }),
+    ).resolves.toBeUndefined();
+    // The connector names ONLY its own static kind — never a package id.
+    expect(selectForConnector).toHaveBeenCalledWith("wordpress");
+    // It forwards ONLY the non-identity coordinates; the host derives the
+    // trusted actor itself (never from the connector).
+    expect(requireWrite).toHaveBeenCalledWith({
+      instanceId: "wp-1",
+      primitiveName: "wordpress_post_update",
+    });
+  });
+
+  it("requireInstanceWriteAuthority FAILS LOUD on an old host that did not publish the instance-write-authority service (cinatra#409 fail-closed)", async () => {
+    // No @cinatra-ai/host:instance-write-authority provider registered.
+    activateWithServices({});
+    await expect(
+      getWordPressDeps().requireInstanceWriteAuthority({
+        instanceId: "wp-1",
+        primitiveName: "wordpress_post_update",
+      }),
+    ).rejects.toThrow(/host service "@cinatra-ai\/host:instance-write-authority" is not registered/);
+  });
+
   it("listInstancesSorted orders most-recently-updated first (host listWordPressInstances ordering)", () => {
     activateWithServices({
       "@cinatra-ai/host:wordpress-mcp": {

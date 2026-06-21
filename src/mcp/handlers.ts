@@ -15,6 +15,34 @@ function stripCodeFences(text: string): string {
   return text.replace(/^```(?:json)?\n?|\n?```$/g, "").trim();
 }
 
+// Per-user / per-connector-instance WRITE-authority gate (cinatra#409).
+//
+// EVERY write primitive calls this AFTER resolving the instance and BEFORE
+// dispatching the write to the host writer. The host dep derives the trusted
+// user actor from the active MCP request frame (NEVER from connector tool
+// input), denies a null actor (no userId+orgId), and enforces the user's
+// per-instance `use` entitlement via requireConnectorAuthority — throwing on
+// deny.
+//
+// FAIL-CLOSED: the registry passes only an SDK-shape `actor` literal that is NO
+// LONGER an authz input (the SDK types `request.actor` as `unknown`). If the
+// host is old / skewed and the dep is unbound (or not a function), this guard
+// THROWS rather than letting the write proceed under a synthetic/anonymous
+// actor — the write path is deny-by-default when authorization cannot run.
+async function requireWriteAuthority(instanceId: string, primitiveName: string): Promise<void> {
+  const gate = getWordPressDeps().requireInstanceWriteAuthority;
+  if (typeof gate !== "function") {
+    // Unbound on an old/partial host: deny — never write without the gate.
+    throw new Error(
+      `WordPress write "${primitiveName}" denied: per-user write-authority gate is unavailable ` +
+        "(host requireInstanceWriteAuthority unbound). Refusing to write without authorization.",
+    );
+  }
+  // Throws on deny (non-member / member-without-right / null actor / cross-org
+  // instance / platform-admin on the widget path). Resolving == authorized.
+  await gate({ instanceId, primitiveName });
+}
+
 export const instanceIdSchema = z.object({
   instanceId: z.string().min(1),
 });
@@ -102,6 +130,7 @@ export function createWordPressPrimitiveHandlers() {
       const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === input.instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
+      await requireWriteAuthority(input.instanceId, "wordpress_post_create_draft");
       return getWordPressDeps().createDraft({
         instance,
         payload: { title: input.title, content: input.content, excerpt: input.excerpt, status: "draft" },
@@ -121,6 +150,7 @@ export function createWordPressPrimitiveHandlers() {
       const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === input.instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
+      await requireWriteAuthority(input.instanceId, "wordpress_post_delete");
       await getWordPressDeps().deletePost({ instance, wordpressPostId: input.postId });
       return { ok: true };
     },
@@ -130,6 +160,7 @@ export function createWordPressPrimitiveHandlers() {
       const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
+      await requireWriteAuthority(instanceId, "wordpress_media_upload");
       return getWordPressDeps().uploadMedia({ instance, ...rest });
     },
 
@@ -171,6 +202,7 @@ export function createWordPressPrimitiveHandlers() {
       const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
+      await requireWriteAuthority(instanceId, "wordpress_post_update_meta");
       // Distinguish "no fields supplied" from "all fields stripped".
       // `z.record` allows {} so the schema cannot reject the empty-object
       // case; surface a precise error instead of claiming everything was an
@@ -203,6 +235,7 @@ export function createWordPressPrimitiveHandlers() {
       const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === input.instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
+      await requireWriteAuthority(input.instanceId, "wordpress_post_update");
       return getWordPressDeps().updatePost({
         instance,
         wordpressPostId: input.postId,

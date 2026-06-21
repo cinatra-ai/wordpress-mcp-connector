@@ -21,6 +21,11 @@ const dispatchContentEditorMock = vi.fn(
 );
 const updatePostMock = vi.fn();
 const updateDraftMetaMock = vi.fn();
+// cinatra#409 per-user write-authority gate. Default: ALLOW (resolves void).
+// The deny/forged-org/unbound suites below override this per-case.
+const requireInstanceWriteAuthorityMock = vi.fn(
+  async (_input: { instanceId: string; primitiveName: string }) => {},
+);
 const listMcpInstancesMock = vi.fn(() => [
   {
     id: "site-1",
@@ -58,6 +63,7 @@ function registerStubDeps() {
     uploadMedia: vi.fn(),
     updateDraftMeta: updateDraftMetaMock,
     updatePost: updatePostMock,
+    requireInstanceWriteAuthority: requireInstanceWriteAuthorityMock,
   });
 }
 
@@ -200,6 +206,9 @@ describe("wordpress_post_update", () => {
     handlers = createWordPressPrimitiveHandlers();
     updatePostMock.mockReset();
     updatePostMock.mockResolvedValue({ id: 10, status: "draft" });
+    // cinatra#409: the gate is invoked by every write primitive; default ALLOW.
+    requireInstanceWriteAuthorityMock.mockReset();
+    requireInstanceWriteAuthorityMock.mockResolvedValue(undefined);
   });
 
   it("is registered as a handler key on createWordPressPrimitiveHandlers()", () => {
@@ -286,6 +295,9 @@ describe("wordpress_post_update_meta empty-field guard", () => {
     handlers = createWordPressPrimitiveHandlers();
     updateDraftMetaMock.mockReset();
     updateDraftMetaMock.mockResolvedValue({ ok: true } as any);
+    // cinatra#409: meta updates go through the write-authority gate; default ALLOW.
+    requireInstanceWriteAuthorityMock.mockReset();
+    requireInstanceWriteAuthorityMock.mockResolvedValue(undefined);
   });
 
   it("wordpress_post_update_meta strips empty-string meta values before dispatch", async () => {
