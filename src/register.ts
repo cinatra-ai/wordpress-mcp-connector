@@ -57,6 +57,25 @@ type HostWordPressContentShape = {
   updateDraftMeta: WordPressConnectorDeps["updateDraftMeta"];
   updatePost: WordPressConnectorDeps["updatePost"];
 };
+// Per-user / per-connector-instance WRITE-authority host service (cinatra#409).
+// The host publishes ONE shared `instance-write-authority` service
+// (`HostInstanceWriteAuthorityService`, capability id below). The host binds an
+// impl that derives the trusted actor from the active MCP request frame
+// (mcpRequestContextStorage), DENIES fail-closed when no userId+orgId resolve,
+// then enforces (1) PER-INSTANCE org-binding == the trusted actor's org (so a
+// forged/cross-org instanceId is denied) and (2) the connector-package
+// requireConnectorAuthority policy. `selectForConnector(kind)` maps the
+// connector KIND to BOTH the package id and the instance reader HOST-SIDE — the
+// connector names only its OWN static kind ("wordpress"), never a package id or
+// another caller-chosen selector. The host THROWS on an unknown kind, so the
+// package whose policy is evaluated is always host-controlled, never caller
+// input. `requireWrite` resolves void on allow / throws on deny; the connector
+// forwards only instanceId+primitiveName, identity is NEVER connector-supplied.
+type HostInstanceWriteAuthorityShape = {
+  selectForConnector(kind: string): {
+    requireWrite: (input: { instanceId: string; primitiveName: string; sourceType?: string }) => Promise<void>;
+  };
+};
 
 /** Lazy per-concern host-service resolution (fail-loud on a missing service —
  * the host boot wiring publishes these before any connector call runs). */
@@ -81,6 +100,10 @@ function buildHostBoundDeps(ctx: ExtensionHostContext): WordPressConnectorDeps {
   const wordpressMcp = () => hostService<HostWordPressMcpShape>(ctx, "@cinatra-ai/host:wordpress-mcp");
   const wordpressContent = () =>
     hostService<HostWordPressContentShape>(ctx, "@cinatra-ai/host:wordpress-content");
+  // cinatra#409 — resolved lazily at call time; fail-loud if the host did not
+  // publish it (an old host) so the writer denies rather than writes unguarded.
+  const writeAuthority = () =>
+    hostService<HostInstanceWriteAuthorityShape>(ctx, "@cinatra-ai/host:instance-write-authority");
   return {
     decodeCursor: (cursor) => pagination().decodeCursor(cursor),
     buildListPage: <T,>(items: T[], total: number, offset: number, limit: number) =>
@@ -104,6 +127,17 @@ function buildHostBoundDeps(ctx: ExtensionHostContext): WordPressConnectorDeps {
     uploadMedia: (input) => wordpressContent().uploadMedia(input),
     updateDraftMeta: (input) => wordpressContent().updateDraftMeta(input),
     updatePost: (input) => wordpressContent().updatePost(input),
+    // cinatra#409 — per-user write authorization. Binds to the connector's OWN
+    // static KIND ("wordpress") — the host maps it to BOTH the package id and the
+    // instance reader; the connector forwards only instanceId+primitiveName, and
+    // the host impl derives the trusted actor from the MCP request frame and
+    // throws on deny / null actor (fail-closed). If the host service is absent
+    // (old host), hostService() throws → here the throw surfaces as a REJECTED
+    // promise (async member) so the awaiting writer denies (never writes
+    // unguarded), the same as a real deny. The kind is host-allowlist-validated,
+    // never caller-supplied.
+    requireInstanceWriteAuthority: async (input) =>
+      writeAuthority().selectForConnector("wordpress").requireWrite(input),
   };
 }
 

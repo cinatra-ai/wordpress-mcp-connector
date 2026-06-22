@@ -45,6 +45,10 @@ function registerStubDeps() {
     uploadMedia: vi.fn(),
     updateDraftMeta: vi.fn(),
     updatePost: vi.fn(),
+    // cinatra#409 write-authority gate — the widget tool drives the
+    // wordpress_content_editor_run RELAY (a DISPATCH, not a direct writer), so
+    // this gate is unused on this suite's code path.
+    requireInstanceWriteAuthority: vi.fn(async () => {}),
   });
 }
 
