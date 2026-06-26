@@ -67,6 +67,73 @@ function registerStubDeps() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// wordpress_instances_list read-boundary redaction
+// A read/list primitive MUST NOT emit credential material. The handler returns
+// redacted public rows — never applicationPassword nor the Nango credential
+// binding (providerConfigKey/connectionId).
+// ---------------------------------------------------------------------------
+describe("wordpress_instances_list — read-boundary redaction", () => {
+  let handlers: ReturnType<typeof createWordPressPrimitiveHandlers>;
+  beforeEach(() => {
+    _resetWordPressDepsForTests();
+    registerStubDeps();
+    handlers = createWordPressPrimitiveHandlers();
+    listMcpInstancesMock.mockReset();
+    listMcpInstancesMock.mockReturnValue([
+      {
+        id: "site-1",
+        siteUrl: "https://example.com",
+        username: "u",
+        // credential material that must NEVER reach a read caller:
+        applicationPassword: "super-secret-app-pass",
+        providerConfigKey: "wordpress",
+        connectionId: "nango-conn-123",
+        name: "Site 1",
+        createdAt: "",
+        updatedAt: "",
+      },
+    ]);
+  });
+
+  function call() {
+    return (handlers as any).wordpress_instances_list({
+      primitiveName: "wordpress_instances_list",
+      input: {},
+      actor: { actorType: "model", source: "agent" },
+      mode: "agentic",
+    });
+  }
+
+  // POSITIVE: the intended authorized path still returns instances with the
+  // non-secret display fields a caller needs to pick an instance.
+  it("returns instances with non-secret display fields (authorized path still works)", async () => {
+    const result = await call();
+    expect(Array.isArray(result)).toBe(true);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      id: "site-1",
+      name: "Site 1",
+      siteUrl: "https://example.com",
+      username: "u",
+    });
+  });
+
+  // NEGATIVE regression: returned rows must NEVER contain applicationPassword or
+  // the credential binding — the unauthorized credential-harvest path is denied.
+  it("NEVER returns applicationPassword or credential binding (cross-actor harvest denied)", async () => {
+    const result = await call();
+    for (const row of result) {
+      expect(row).not.toHaveProperty("applicationPassword");
+      expect(row).not.toHaveProperty("providerConfigKey");
+      expect(row).not.toHaveProperty("connectionId");
+      // Belt-and-braces: no field value leaks the secret string either.
+      expect(JSON.stringify(row)).not.toContain("super-secret-app-pass");
+      expect(JSON.stringify(row)).not.toContain("nango-conn-123");
+    }
+  });
+});
+
 describe("wordpress_content_editor_run", () => {
   let handlers: ReturnType<typeof createWordPressPrimitiveHandlers>;
   beforeEach(() => {

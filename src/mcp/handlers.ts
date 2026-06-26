@@ -5,7 +5,33 @@ import type { ExtensionPrimitiveRequest } from "@cinatra-ai/sdk-extensions";
 // `@cinatra-ai/host:wordpress-mcp` service, the post/media CRUD from the NEW
 // `@cinatra-ai/host:wordpress-content` service, pagination from
 // `@cinatra-ai/host:mcp-pagination` — no `@/lib/wordpress-api` import.
-import { getWordPressDeps, listInstancesSorted } from "../deps";
+import {
+  getWordPressDeps,
+  listInstancesSorted,
+  type WordPressMcpInstance,
+  type WordPressMcpPublicInstance,
+} from "../deps";
+
+// READ-BOUNDARY redaction. A read/list primitive must NEVER emit credential
+// material. This projection drops `applicationPassword` AND the
+// Nango credential binding (`providerConfigKey`/`connectionId`) — anything a
+// caller could use to authenticate against the site — and returns only
+// non-secret display fields. Write primitives are unaffected: they re-resolve
+// the FULL row via `listInstancesSorted().find(...)` and thread it host-side,
+// where Basic auth is resolved from the row's binding; callers never receive
+// the password.
+function toPublicInstance(i: WordPressMcpInstance): WordPressMcpPublicInstance {
+  return {
+    id: i.id,
+    name: i.name,
+    siteUrl: i.siteUrl,
+    username: i.username,
+    lastValidatedAt: i.lastValidatedAt,
+    createdAt: i.createdAt,
+    updatedAt: i.updatedAt,
+    blogConnectorId: i.blogConnectorId,
+  };
+}
 
 // Strip Markdown code fences from LLM-emitted JSON before parse. The
 // wayflow-wordpress-content-editor agent's LLM occasionally wraps its JSON
@@ -122,7 +148,8 @@ export function createWordPressPrimitiveHandlers() {
     },
 
     "wordpress_instances_list": async (_request: ExtensionPrimitiveRequest<unknown>) => {
-      return listInstancesSorted();
+      // Redact credential material at the read boundary.
+      return listInstancesSorted().map(toPublicInstance);
     },
 
     "wordpress_post_create_draft": async (request: ExtensionPrimitiveRequest<unknown>) => {

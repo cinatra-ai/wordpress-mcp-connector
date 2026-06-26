@@ -71,6 +71,25 @@ export type WordPressMcpInstance = {
   blogConnectorId?: string;
 };
 
+/**
+ * Public (redacted) projection of a WordPress instance for READ/LIST
+ * primitives. NEVER carries `applicationPassword` or the Nango credential
+ * binding (`providerConfigKey`/`connectionId`) — those are secret/credential
+ * material that read-capable callers (incl. LLM tool paths) must never receive.
+ * The `wordpress_instances_list` read handler returns this shape; write
+ * primitives keep using the full `WordPressMcpInstance` row host-side.
+ */
+export type WordPressMcpPublicInstance = {
+  id: string;
+  name: string;
+  siteUrl: string;
+  username: string;
+  lastValidatedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  blogConnectorId?: string;
+};
+
 /** Aggregate connector status (host `getWordPressAPIStatus` shape). */
 export type WordPressApiStatus = {
   status: "connected" | "not_connected";
