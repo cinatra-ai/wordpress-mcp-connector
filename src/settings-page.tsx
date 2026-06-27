@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { ExtensionHostContext } from "@cinatra-ai/sdk-extensions";
 import { Button } from "./components/ui/button";
 import { Badge } from "./components/ui/badge";
+import { Input } from "./components/ui/input";
 import { Main, PageHeader, PageContent } from "@cinatra-ai/sdk-ui/marketplace";
 // Instance/status reads come from the host-bound deps slot (the extended
 // `@cinatra-ai/host:wordpress-mcp` service) — no `@/lib/wordpress-api` import
@@ -62,7 +63,7 @@ export async function WordPressSettingsPage(props: {
                       </Link>
                     </Button>
                     <form action={deleteWordPressInstanceAction}>
-                      <input type="hidden" name="instanceId" value={instance.id} />
+                      <Input type="hidden" name="instanceId" value={instance.id} />
                       <Button
                         type="submit"
                         formNoValidate
