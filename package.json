@@ -1,6 +1,6 @@
 {
   "name": "@cinatra-ai/wordpress-mcp-connector",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "license": "Apache-2.0",
   "type": "module",
   "files": [
@@ -56,6 +56,10 @@
   "cinatra": {
     "apiVersion": "cinatra.ai/v1",
     "kind": "connector",
+    "vendor": {
+      "key": "cinatra-ai",
+      "name": "Cinatra"
+    },
     "displayName": "WordPress MCP",
     "providesExternalMcpToolbox": true,
     "serverEntry": "./register",
