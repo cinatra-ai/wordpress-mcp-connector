@@ -68,6 +68,7 @@
       "capabilities"
     ],
     "dependencies": [],
+    "sdkAbiRange": "^2",
     "capabilities": {
       "widget-chat.wordpress-content-editor": "wordpress-widget-chat"
     },
