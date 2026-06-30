@@ -1,13 +1,12 @@
 import Link from "next/link";
 import type { ExtensionHostContext } from "@cinatra-ai/sdk-extensions";
 import { Button } from "./components/ui/button";
-import { Badge } from "./components/ui/badge";
 import { Input } from "./components/ui/input";
 import { Main, PageHeader, PageContent } from "@cinatra-ai/sdk-ui/marketplace";
 // Instance/status reads come from the host-bound deps slot (the extended
 // `@cinatra-ai/host:wordpress-mcp` service) — no `@/lib/wordpress-api` import
 // (cinatra#172 Stage H3).
-import { getWordPressDeps, listInstancesSorted } from "./deps";
+import { listInstancesSorted } from "./deps";
 import { deleteWordPressInstanceAction } from "./setup-actions";
 import { WordPressNangoConnectCard } from "./wordpress-nango-connect-card";
 
@@ -21,20 +20,19 @@ export async function WordPressSettingsPage(props: {
 }) {
   const { ctx } = props;
   const instances = listInstancesSorted();
-  const status = getWordPressDeps().getApiStatus();
   const nangoFrontendConfig = (await ctx.nango.getFrontendConfig?.()) ?? {};
   const nangoStatus = (await ctx.nango.getStatus?.()) ?? { status: "not_connected" as const };
 
   return (
     <Main className="min-h-screen">
+      {/* The connection-status badge is HOST-injected on the connector
+          setup-page dispatch route — the same badge the /connectors card
+          shows — so the extension no longer renders its own status pill
+          here (it would duplicate the host badge). The title + form stay
+          extension-owned. */}
       <PageHeader
         title="WordPress MCP"
         description="Connect one or more self-hosted WordPress instances so Cinatra can create formatted blog post drafts directly in each site's admin area."
-        actions={
-          <Badge variant={status.status === "connected" ? "default" : "secondary"}>
-            {status.status === "connected" ? `${instances.length} connected` : "Setup required"}
-          </Badge>
-        }
       />
       <PageContent className="flex flex-col gap-6 pb-8">
         <WordPressNangoConnectCard
