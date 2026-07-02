@@ -11,6 +11,7 @@
     "wordpress_post_get",
     "wordpress_posts_list",
     "wordpress_post_get_latest",
+    "wordpress_post_update",
     "wordpress_post_update_meta",
     "wordpress_post_delete",
     "wordpress_media_upload"
