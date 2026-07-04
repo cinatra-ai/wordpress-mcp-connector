@@ -4,6 +4,7 @@ import { createWordPressPrimitiveHandlers } from "@cinatra-ai/wordpress-mcp-conn
 import {
   registerWordPressConnector,
   _resetWordPressDepsForTests,
+  type WordPressMcpInstance,
 } from "../deps";
 
 // All host surfaces resolve through the deps SLOT (cinatra#172 Stage H3): the
@@ -26,7 +27,7 @@ const updateDraftMetaMock = vi.fn();
 const requireInstanceWriteAuthorityMock = vi.fn(
   async (_input: { instanceId: string; primitiveName: string }) => {},
 );
-const listMcpInstancesMock = vi.fn(() => [
+const listMcpInstancesMock = vi.fn((): WordPressMcpInstance[] => [
   {
     id: "site-1",
     siteUrl: "https://example.com",

@@ -197,7 +197,14 @@ describe("createWordPressExternalMcpToolbox().buildTools", () => {
       listMcpInstances.mockReturnValue([inst("a")]);
       requireInstanceWriteAuthority.mockResolvedValue(undefined);
 
-      const result = await createWordPressExternalMcpToolbox().buildTools("openai", {
+      // The SDK contract is still the narrow `buildTools(provider)`; the widened
+      // actor-frame parameter is connector-local forward-compat (see
+      // WordPressToolboxActor in ../mcp/toolbox), so call through the widened shape.
+      const buildTools = createWordPressExternalMcpToolbox().buildTools as (
+        provider: string,
+        actor?: { userId?: string; organizationId?: string },
+      ) => Promise<unknown[]>;
+      const result = await buildTools("openai", {
         userId: "",
         organizationId: "",
       });
