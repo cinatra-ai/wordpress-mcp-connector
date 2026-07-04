@@ -161,6 +161,15 @@ export interface WordPressConnectorDeps {
   buildListPage: <T>(items: T[], total: number, offset: number, limit: number) => ListPage<T>;
   /** Host-owned A2A dispatch to the wordpress-content-editor agent. */
   dispatchContentEditor: (input: DispatchContentEditorInput) => Promise<string>;
+  /**
+   * OPTIONAL per-deployment override for the content-editor A2A agent URL.
+   * Bound by `register.ts` to the `settings` host port (key
+   * `content_editor_a2a_url`) — connector code never reads `process.env`
+   * (boundary rule, cinatra#978). Resolves `null` when no override is
+   * configured; the handler then uses its static default URL. OPTIONAL for
+   * skew: a deps binding that predates this member falls back the same way.
+   */
+  resolveContentEditorAgentUrl?: () => Promise<string | null>;
   /** Host-owned instance hard-delete (`@/lib/wordpress-api` deleteWordPressInstance). */
   deleteInstance: (id: string) => Promise<void>;
   // ---- external-MCP toolbox surfaces (host-bound; consumed by src/mcp/toolbox.ts) ----

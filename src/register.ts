@@ -109,6 +109,19 @@ function buildHostBoundDeps(ctx: ExtensionHostContext): WordPressConnectorDeps {
     buildListPage: <T,>(items: T[], total: number, offset: number, limit: number) =>
       pagination().buildListPage(items, total, offset, limit),
     dispatchContentEditor: (input) => contentEditor().dispatch(input),
+    // Boundary fix (cinatra#978): the content-editor A2A URL override arrives
+    // through the granted `settings` host port (key "content_editor_a2a_url"),
+    // never from a direct process.env read in connector code. A host that
+    // cannot serve the port (skew) degrades to `null` → the handler's static
+    // default URL, the same posture as an unset override.
+    resolveContentEditorAgentUrl: async () => {
+      try {
+        const value = await ctx.settings.get<string>("content_editor_a2a_url");
+        return typeof value === "string" && value.length > 0 ? value : null;
+      } catch {
+        return null;
+      }
+    },
     deleteInstance: (id) => wordpressMcp().deleteInstance(id),
     listMcpInstances: () => wordpressMcp().listInstances(),
     probeMcpAdapter: (instance) => wordpressMcp().probeAdapter(instance),

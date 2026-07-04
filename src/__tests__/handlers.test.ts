@@ -4,6 +4,7 @@ import { createWordPressPrimitiveHandlers } from "@cinatra-ai/wordpress-mcp-conn
 import {
   registerWordPressConnector,
   _resetWordPressDepsForTests,
+  type WordPressConnectorDeps,
   type WordPressMcpInstance,
 } from "../deps";
 
@@ -39,7 +40,7 @@ const listMcpInstancesMock = vi.fn((): WordPressMcpInstance[] => [
   },
 ]);
 
-function registerStubDeps() {
+function registerStubDeps(extra: Partial<WordPressConnectorDeps> = {}) {
   registerWordPressConnector({
     decodeCursor: (cursor?: string) => (cursor ? Number(cursor) || 0 : 0),
     buildListPage: (items, total, offset, limit) => ({
@@ -65,6 +66,7 @@ function registerStubDeps() {
     updateDraftMeta: updateDraftMetaMock,
     updatePost: updatePostMock,
     requireInstanceWriteAuthority: requireInstanceWriteAuthorityMock,
+    ...extra,
   });
 }
 
@@ -143,7 +145,6 @@ describe("wordpress_content_editor_run", () => {
     handlers = createWordPressPrimitiveHandlers();
     dispatchContentEditorMock.mockReset();
     dispatchContentEditorMock.mockResolvedValue("{}");
-    delete process.env.WP_CONTENT_EDITOR_A2A_URL;
   });
 
   it("is registered as a handler key on createWordPressPrimitiveHandlers()", () => {
@@ -197,8 +198,13 @@ describe("wordpress_content_editor_run", () => {
     );
   });
 
-  it("respects WP_CONTENT_EDITOR_A2A_URL when set", async () => {
-    process.env.WP_CONTENT_EDITOR_A2A_URL = "http://wayflow-wordpress-content-editor:3021";
+  it("respects the host-settings agentUrl override when the dep resolves one", async () => {
+    // Boundary rule (cinatra#978): the override arrives through the host-bound
+    // `resolveContentEditorAgentUrl` dep (`settings` host port), never via a
+    // process.env read in connector code.
+    registerStubDeps({
+      resolveContentEditorAgentUrl: async () => "http://wayflow-wordpress-content-editor:3021",
+    });
     await (handlers as any).wordpress_content_editor_run({
       primitiveName: "wordpress_content_editor_run",
       input: { instanceId: "site-1", postId: 10, instructions: "edit" },

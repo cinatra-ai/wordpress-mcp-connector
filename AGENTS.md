@@ -41,7 +41,7 @@ Status is constrained to a Zod enum: `z.enum(["publish", "future", "draft", "pen
 
 ## `wordpress_content_editor_run` — A2A blocking dispatch
 
-Dispatches to `wayflow-wordpress-content-editor` (default `http://localhost:3021`, overridable via `WP_CONTENT_EDITOR_A2A_URL`). Uses `timeoutMs: 300_000` (5 minutes). Reads the result from `task.history` — never `task.artifacts` (WayFlow does not implement `task.artifacts`). Strips Markdown code fences before `JSON.parse`.
+Dispatches to `wayflow-wordpress-content-editor` (default `http://localhost:3010/agents/cinatra-ai/wordpress-agent`, overridable via the `content_editor_a2a_url` connector setting read through the `settings` host port — connector code never reads `process.env`). Uses `timeoutMs: 300_000` (5 minutes). Reads the result from `task.history` — never `task.artifacts` (WayFlow does not implement `task.artifacts`). Strips Markdown code fences before `JSON.parse`.
 
 ## Tests
 
