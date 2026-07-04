@@ -289,8 +289,13 @@ export function createWordPressPrimitiveHandlers() {
     "wordpress_content_editor_run": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const input = contentEditorRunSchema.parse(request.input);
 
+      // Boundary rule (cinatra#978): connector code never reads process.env.
+      // The optional per-deployment URL override arrives through the
+      // host-bound `resolveContentEditorAgentUrl` dep (`settings` host port,
+      // key "content_editor_a2a_url"); absent, unbound, or unset resolves the
+      // static default route.
       const agentUrl =
-        process.env.WP_CONTENT_EDITOR_A2A_URL ??
+        (await getWordPressDeps().resolveContentEditorAgentUrl?.()) ??
         "http://localhost:3010/agents/cinatra-ai/wordpress-agent";
 
       const text = await getWordPressDeps().dispatchContentEditor({

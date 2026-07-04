@@ -65,7 +65,8 @@
     "serverEntry": "./register",
     "requestedHostPorts": [
       "nango",
-      "capabilities"
+      "capabilities",
+      "settings"
     ],
     "dependencies": [],
     "sdkAbiRange": "^2",
