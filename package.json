@@ -21,7 +21,8 @@
     "./mcp-toolbox": "./src/mcp/toolbox.ts",
     "./mcp-module": "./src/mcp/module.ts",
     "./widget-chat-tool": "./src/widget-chat-tool.ts",
-    "./src/webhooks/post-published": "./src/webhooks/post-published.ts"
+    "./src/webhooks/post-published": "./src/webhooks/post-published.ts",
+    "./src/dev-setup": "./src/dev-setup.ts"
   },
   "scripts": {
     "test": "vitest",
@@ -63,6 +64,7 @@
     "displayName": "WordPress MCP",
     "providesExternalMcpToolbox": true,
     "serverEntry": "./register",
+    "devSetup": "./src/dev-setup",
     "requestedHostPorts": [
       "nango",
       "capabilities",
