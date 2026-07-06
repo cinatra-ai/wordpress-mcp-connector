@@ -18,9 +18,7 @@
 // resolve at call time through the capability port on the hook context.
 
 import { Buffer } from "node:buffer";
-import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import path from "node:path";
 
 import type {
   ExtensionDevSetupContext,
@@ -477,8 +475,19 @@ export async function runDevSetup(ctx: ExtensionDevSetupContext): Promise<Extens
     return { status: "skipped", reason: `${LOCAL_WORDPRESS.siteUrl} not reachable` };
   }
   // The WordPress plugin is consumed as a local clone of cinatra-ai/wordpress-plugin
-  // (synced by `cinatra setup dev`). Skip cleanly if it hasn't been cloned yet.
-  if (!existsSync(path.join(process.cwd(), "dev/wordpress-plugin/cinatra.php"))) {
+  // (synced by `cinatra setup dev`) and BIND-MOUNTED into the container at
+  // wp-content/plugins/cinatra (docker-compose.yml). Probe for it INSIDE the
+  // container through the host-owned dockerExecCapture helper instead of reaching
+  // for node:fs against the host cwd (cinatra#979/#981 extension fs-import ban) —
+  // a missing/empty bind mount yields a non-zero `test -f` and the SAME clean
+  // skip. `test` is a POSIX sh builtin, so this has no coreutils dependency.
+  if (
+    helpers.dockerExecCapture(LOCAL_WORDPRESS.containerName, [
+      "sh",
+      "-c",
+      "test -f /var/www/html/wp-content/plugins/cinatra/cinatra.php",
+    ]).code !== 0
+  ) {
     return {
       status: "skipped",
       reason: "plugin clone missing at dev/wordpress-plugin/cinatra.php. Run `cinatra setup dev` first.",
