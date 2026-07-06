@@ -25,6 +25,11 @@ import { randomBytes, randomUUID } from "node:crypto";
 
 import type { ExtensionHostContext } from "@cinatra-ai/sdk-extensions";
 import { registerWordPressConnector, type WordPressConnectorDeps } from "./deps";
+import {
+  createWordPressClient,
+  type WordPressClient,
+  type WordPressInstanceSettings,
+} from "./lib/wordpress-client";
 
 const PACKAGE_NAME = "@cinatra-ai/wordpress-mcp-connector";
 
@@ -80,9 +85,17 @@ type HostInstanceWriteAuthorityShape = {
 };
 
 /** Lazy per-concern host-service resolution (fail-loud on a missing service —
- * the host boot wiring publishes these before any connector call runs). */
+ * the host boot wiring publishes these before any connector call runs).
+ * Prefers a provider registered by ANOTHER package: since cinatra#975 Wave 3
+ * this connector ALSO registers itself under the wordpress-mcp /
+ * wordpress-content ids (the relocated client, provider-flip below), so a bare
+ * `[0]` could self-resolve depending on registration order. The host's own
+ * publication stays the deps-slot source until the core-eviction follow-up;
+ * the `?? providers[0]` fallback keeps deps working on a post-eviction host
+ * where only this connector's provider remains. */
 function hostService<T>(ctx: ExtensionHostContext, capability: string): T {
-  const provider = ctx.capabilities.resolveProviders(capability)[0];
+  const providers = ctx.capabilities.resolveProviders(capability);
+  const provider = providers.find((p) => p.packageName !== PACKAGE_NAME) ?? providers[0];
   if (!provider) {
     throw new Error(
       `${PACKAGE_NAME}: host service "${capability}" is not registered — ` +
@@ -211,6 +224,146 @@ function buildWidgetAuthProvider(ctx: ExtensionHostContext): WordPressWidgetAuth
   };
 }
 
+// --- relocated WordPress REST vendor client (cinatra#975 Wave 3 —
+// vendor-publish-direction inversion, epic #978) ------------------------------
+// This connector now OWNS the core `src/lib/wordpress-api.ts` client
+// (`./lib/wordpress-client`) and registers it back under the SAME two host
+// capability ids core publishes today — the provider FLIP (the Wave-2
+// widget-auth precedent, #56 / cinatra#1066). Until the core-eviction
+// follow-up merges, the host's own publication keeps serving consumers (both
+// providers coexist in the registry, keyed by packageName); afterwards core
+// resolves THIS provider (pinned to the manifest-derived owner) at every
+// former `@/lib/wordpress-api` import site.
+//
+// SPLIT BY CONCERN, mirroring the host's publication exactly:
+//   - `@cinatra-ai/host:wordpress-content` — the post/media CONTENT surface
+//     (the full existing `HostWordPressContentService` member set).
+//   - `@cinatra-ai/host:wordpress-mcp` — the connection/instance-admin
+//     members the client backs, PLUS the additive client members core's
+//     former import sites need (save/validate/logging/latest-post/
+//     nango-materialize/dev-persist), named EXACTLY like the core exports so
+//     the eviction re-point is mechanical. Additive members are resolved
+//     STRUCTURALLY by consumers (the HostExternalMcpRegistrySetupSurface
+//     precedent) — no packages/sdk-extensions change.
+//
+// EXPLICIT NON-MEMBERS (stay host-published on the wordpress-mcp id): the
+// mcp-adapter probes / endpoint resolution / url-policy
+// (`@/lib/wordpress-mcp-connection` — not this slice), the actor-scoped
+// `listAuthorizedInstances` + write authority (authz stays core, #975), and
+// the dev-MODE guard on the `dev*` members (`assertDevSetupHostOnly` is
+// host-side defense-in-depth; the client's dev persist keeps its intrinsic
+// loopback hard-gate).
+
+/** The wordpress-content instance-row input (structural mirror of the SDK
+ * `WordPressInstanceRowShape` — row timestamps OPTIONAL for skew). */
+type WordPressContentInstanceInput = Omit<WordPressInstanceSettings, "createdAt" | "updatedAt"> & {
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+/** Contract rows keep timestamps OPTIONAL for skew while the client requires
+ * them — host rows always carry them, so the epoch fallback only guards
+ * hand-built rows from a skewed companion (byte-for-byte the host's
+ * `asWordPressInstanceRow` adapter in register-host-connector-services.ts). */
+function asWordPressInstanceRow(instance: WordPressContentInstanceInput): WordPressInstanceSettings {
+  return {
+    ...instance,
+    createdAt: instance.createdAt ?? new Date(0).toISOString(),
+    updatedAt: instance.updatedAt ?? new Date(0).toISOString(),
+  };
+}
+
+/** The `@cinatra-ai/host:wordpress-content` provider impl — the full existing
+ * contract member set, backed by the connector-owned client. */
+function buildWordPressContentProvider(client: WordPressClient) {
+  return {
+    createDraft: (input: { instance: WordPressContentInstanceInput; payload: Parameters<WordPressClient["createWordPressDraft"]>[0]["payload"] }) =>
+      client.createWordPressDraft({ instance: asWordPressInstanceRow(input.instance), payload: input.payload }),
+    readPost: (input: { instance: WordPressContentInstanceInput; wordpressPostId: number; postType?: string }) =>
+      client.readWordPressPost({
+        instance: asWordPressInstanceRow(input.instance),
+        wordpressPostId: input.wordpressPostId,
+        postType: input.postType,
+      }),
+    readPostStatus: (input: { instance: WordPressContentInstanceInput; wordpressPostId: number }) =>
+      client.readWordPressPostStatus({
+        instance: asWordPressInstanceRow(input.instance),
+        wordpressPostId: input.wordpressPostId,
+      }),
+    listPublishedPosts: (
+      instance: WordPressContentInstanceInput,
+      options?: { offset?: number; limit?: number },
+    ) => client.listPublishedWordPressPosts(asWordPressInstanceRow(instance), options),
+    deletePost: (input: { instance: WordPressContentInstanceInput; wordpressPostId: number }) =>
+      client.deleteWordPressPost({
+        instance: asWordPressInstanceRow(input.instance),
+        wordpressPostId: input.wordpressPostId,
+      }),
+    uploadMedia: (input: {
+      instance: WordPressContentInstanceInput;
+      imageBase64: string;
+      imageMimeType: string;
+      title: string;
+    }) => client.uploadWordPressMedia({ ...input, instance: asWordPressInstanceRow(input.instance) }),
+    updateDraftMeta: (input: {
+      instance: WordPressContentInstanceInput;
+      wordpressPostId: number;
+      meta: Record<string, unknown>;
+    }) =>
+      client.updateWordPressDraftMeta({
+        instance: asWordPressInstanceRow(input.instance),
+        wordpressPostId: input.wordpressPostId,
+        meta: input.meta,
+      }),
+    updatePost: (input: {
+      instance: WordPressContentInstanceInput;
+      wordpressPostId: number;
+      postType?: string;
+      fields: Parameters<WordPressClient["updateWordPressPost"]>[0]["fields"];
+    }) =>
+      client.updateWordPressPost({
+        instance: asWordPressInstanceRow(input.instance),
+        wordpressPostId: input.wordpressPostId,
+        postType: input.postType,
+        fields: input.fields,
+      }),
+  };
+}
+
+/** The `@cinatra-ai/host:wordpress-mcp` provider impl — the client-backed
+ * connection/instance-admin members (contract names) + the ADDITIVE full-client
+ * members (core export names) the core-eviction follow-up re-points to. */
+function buildWordPressInstanceAdminProvider(client: WordPressClient) {
+  return {
+    // --- client-backed contract members (`HostWordPressMcpService` names) ---
+    listInstances: () => client.getWordPressAPISettings().instances,
+    getAPIStatus: () => client.getWordPressAPIStatus(),
+    getAPISettings: () => client.getWordPressAPISettings(),
+    readInstanceById: (id: string) => client.readWordPressInstanceById(id),
+    // Instance hard-delete. Wrapped to discard any return (contract is
+    // Promise<void>) — identical to the host publication's wrapper.
+    deleteInstance: async (id: string) => {
+      await client.deleteWordPressInstance(id);
+    },
+    webhookSubscriptions: {
+      list: client.listWordPressWebhookSubscriptions,
+      register: client.registerWordPressWebhookSubscription,
+      remove: client.deleteWordPressWebhookSubscription,
+    },
+    // --- additive relocated-client members (core `@/lib/wordpress-api`
+    //     export names; consumed structurally by the eviction follow-up) ---
+    validateWordPressInstanceConnection: client.validateWordPressInstanceConnection,
+    saveWordPressInstance: client.saveWordPressInstance,
+    saveWordPressInstanceFromNangoConnection: client.saveWordPressInstanceFromNangoConnection,
+    persistLocalDevWordPressInstanceUnvalidated: client.persistLocalDevWordPressInstanceUnvalidated,
+    setWordPressInstanceBlogConnector: client.setWordPressInstanceBlogConnector,
+    saveWordPressLoggingSettings: client.saveWordPressLoggingSettings,
+    getWordPressLoggingSettings: client.getWordPressLoggingSettings,
+    listWordPressInstances: client.listWordPressInstances,
+    readLatestPublishedWordPressPost: client.readLatestPublishedWordPressPost,
+  };
+}
+
 export function register(ctx: ExtensionHostContext): void {
   // Transport-DI inversion: bind the host deps slot. Always-bind (the
   // bind-if-absent skew guard was swept once every host this connector can
@@ -228,5 +381,23 @@ export function register(ctx: ExtensionHostContext): void {
   ctx.capabilities.registerProvider("@cinatra-ai/host:wordpress-widget-auth", {
     packageName: PACKAGE_NAME,
     impl: buildWidgetAuthProvider(ctx),
+  });
+
+  // cinatra#975 Wave 3 — register the connector-owned WordPress REST client
+  // (the relocated core `@/lib/wordpress-api`) under the SAME two ids the host
+  // publishes today (see the module comment above the provider builders).
+  // Building the client + both impls does NO host-service resolution and NO
+  // I/O (probe-safe); every member resolves connector-config / nango-system /
+  // instance-connection-gate lazily at call time and fails loud when one is
+  // unresolved. Until the core-eviction follow-up, the host's own publication
+  // keeps serving consumers — these providers coexist keyed by packageName.
+  const wordpressClient = createWordPressClient(ctx);
+  ctx.capabilities.registerProvider("@cinatra-ai/host:wordpress-content", {
+    packageName: PACKAGE_NAME,
+    impl: buildWordPressContentProvider(wordpressClient),
+  });
+  ctx.capabilities.registerProvider("@cinatra-ai/host:wordpress-mcp", {
+    packageName: PACKAGE_NAME,
+    impl: buildWordPressInstanceAdminProvider(wordpressClient),
   });
 }

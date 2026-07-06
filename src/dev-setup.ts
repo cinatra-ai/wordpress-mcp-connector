@@ -437,6 +437,21 @@ function resolveImpl(ctx: ExtensionDevSetupContext, capability: string): unknown
   return ctx.capabilities.resolveProviders(capability)[0]?.impl ?? null;
 }
 
+/** Like `resolveImpl`, but prefers a provider registered by ANOTHER package.
+ * Since cinatra#975 Wave 3 this connector ALSO registers itself under
+ * `@cinatra-ai/host:wordpress-mcp` (the relocated vendor client), while the
+ * dev-setup writers this hook needs (`devSaveInstance` /
+ * `devPersistLocalInstanceUnvalidated`) stay HOST-published — a self-first
+ * registry ordering must not shadow them (codex W3 round-1 finding 3). The
+ * `?? [0]` fallback keeps a single-provider registry resolving. NOT used for
+ * `wordpress-widget-auth`, where the SELF-registered store is the owner. */
+function resolveNonSelfImpl(ctx: ExtensionDevSetupContext, capability: string): unknown {
+  const providers = ctx.capabilities.resolveProviders(capability);
+  return (
+    providers.find((p) => p.packageName !== "@cinatra-ai/wordpress-mcp-connector") ?? providers[0]
+  )?.impl ?? null;
+}
+
 function isWordPressMcpService(impl: unknown): impl is HostWordPressMcpService {
   const c = impl as Partial<HostWordPressMcpService> | null;
   return !!c && typeof c === "object" && typeof c.listInstances === "function" && typeof c.readInstanceById === "function";
@@ -499,7 +514,7 @@ export async function runDevSetup(ctx: ExtensionDevSetupContext): Promise<Extens
     return { status: "skipped", reason: "WordPress not yet installed (run wp core install inside the container first)" };
   }
 
-  const wpImpl = resolveImpl(ctx, "@cinatra-ai/host:wordpress-mcp");
+  const wpImpl = resolveNonSelfImpl(ctx, "@cinatra-ai/host:wordpress-mcp");
   const widgetAuthImpl = resolveImpl(ctx, "@cinatra-ai/host:wordpress-widget-auth");
   const nangoImpl = resolveImpl(ctx, "nango-system");
   if (!isWordPressMcpService(wpImpl) || !isWordPressWidgetAuthService(widgetAuthImpl) || !isNangoSystemSurface(nangoImpl)) {
