@@ -233,3 +233,101 @@ describe("register(ctx) — transport-DI deps binding (Stage 3)", () => {
     );
   });
 });
+
+describe("register(ctx) — relocated WordPress client provider-flip (cinatra#975 Wave 3)", () => {
+  function activateCapturing(impls: Record<string, unknown> = {}) {
+    const registerProvider = vi.fn();
+    const resolveProviders = vi.fn((capability: string) =>
+      impls[capability] !== undefined
+        ? [{ packageName: "@cinatra-ai/host", impl: impls[capability] }]
+        : [],
+    );
+    const ctx = {
+      capabilities: { registerProvider, resolveProviders },
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    } as never;
+    register(ctx);
+    return { registerProvider, resolveProviders };
+  }
+
+  function registeredImpl(registerProvider: ReturnType<typeof vi.fn>, capability: string) {
+    const call = registerProvider.mock.calls.find(([id]) => id === capability);
+    expect(call, `provider registration for ${capability}`).toBeDefined();
+    const [, provider] = call as [string, { packageName: string; impl: Record<string, unknown> }];
+    expect(provider.packageName).toBe("@cinatra-ai/wordpress-mcp-connector");
+    return provider.impl;
+  }
+
+  it("registers the connector-owned client under the SAME host ids (wordpress-content + wordpress-mcp) with NO resolution at activation (probe-safe)", () => {
+    const { registerProvider, resolveProviders } = activateCapturing();
+    // The Wave-2 widget-auth registration is unchanged and rides along.
+    registeredImpl(registerProvider, "@cinatra-ai/host:wordpress-widget-auth");
+
+    const content = registeredImpl(registerProvider, "@cinatra-ai/host:wordpress-content");
+    // The FULL existing HostWordPressContentService member set.
+    for (const member of [
+      "createDraft", "readPost", "readPostStatus", "listPublishedPosts",
+      "deletePost", "uploadMedia", "updateDraftMeta", "updatePost",
+    ]) {
+      expect(typeof content[member], `wordpress-content.${member}`).toBe("function");
+    }
+
+    const admin = registeredImpl(registerProvider, "@cinatra-ai/host:wordpress-mcp");
+    // Client-backed contract members…
+    for (const member of ["listInstances", "getAPIStatus", "getAPISettings", "readInstanceById", "deleteInstance"]) {
+      expect(typeof admin[member], `wordpress-mcp.${member}`).toBe("function");
+    }
+    expect(typeof (admin.webhookSubscriptions as Record<string, unknown>).list).toBe("function");
+    expect(typeof (admin.webhookSubscriptions as Record<string, unknown>).register).toBe("function");
+    expect(typeof (admin.webhookSubscriptions as Record<string, unknown>).remove).toBe("function");
+    // …plus the ADDITIVE relocated-client members (core export names) the
+    // core-eviction follow-up re-points to.
+    for (const member of [
+      "validateWordPressInstanceConnection", "saveWordPressInstance",
+      "saveWordPressInstanceFromNangoConnection", "persistLocalDevWordPressInstanceUnvalidated",
+      "setWordPressInstanceBlogConnector", "saveWordPressLoggingSettings",
+      "getWordPressLoggingSettings", "listWordPressInstances", "readLatestPublishedWordPressPost",
+    ]) {
+      expect(typeof admin[member], `wordpress-mcp.${member}`).toBe("function");
+    }
+    // EXPLICIT NON-MEMBERS: probes/url-policy/actor-scoped listing/dev-mode
+    // guards stay HOST-published (this slice relocates only wordpress-api.ts).
+    for (const member of ["probeAdapter", "resolveServerUrl", "resolveEndpoint", "isPrivateUrl", "listAuthorizedInstances", "devSaveInstance", "devPersistLocalInstanceUnvalidated", "devInvalidateProbeCache"]) {
+      expect(admin[member], `wordpress-mcp.${member} must stay host-side`).toBeUndefined();
+    }
+
+    // Probe-safe: building the client + impls resolved NOTHING.
+    expect(resolveProviders).not.toHaveBeenCalled();
+  });
+
+  it("the registered client provider serves calls through the published capabilities (connector-config-backed read)", () => {
+    const { registerProvider } = activateCapturing({
+      "@cinatra-ai/host:connector-config": {
+        read: <T,>(_id: string, fallback: T): T => fallback,
+        write: () => {},
+      },
+    });
+    const admin = registeredImpl(registerProvider, "@cinatra-ai/host:wordpress-mcp");
+    expect((admin.getAPIStatus as () => { status: string })().status).toBe("not_connected");
+  });
+
+  it("the deps slot PREFERS the host-published provider over the connector's own same-id registration (no self-shadow)", () => {
+    const hostGetAPIStatus = vi.fn(() => ({ status: "connected" as const, detail: "host" }));
+    const resolveProviders = vi.fn((capability: string) => {
+      if (capability !== "@cinatra-ai/host:wordpress-mcp") return [];
+      return [
+        // Deliberately list the SELF-registered provider FIRST — the deps
+        // resolver must still pick the host's.
+        { packageName: "@cinatra-ai/wordpress-mcp-connector", impl: { getAPIStatus: vi.fn() } },
+        { packageName: "@cinatra-ai/host", impl: { getAPIStatus: hostGetAPIStatus } },
+      ];
+    });
+    const ctx = {
+      capabilities: { registerProvider: vi.fn(), resolveProviders },
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    } as never;
+    register(ctx);
+    expect(getWordPressDeps().getApiStatus()).toEqual({ status: "connected", detail: "host" });
+    expect(hostGetAPIStatus).toHaveBeenCalledTimes(1);
+  });
+});
