@@ -358,6 +358,57 @@ describe("listPublishedWordPressPages / Posts — collection routing + metadata 
   });
 });
 
+describe("readWordPressPostStatus / deleteWordPressPost — page-aware routing", () => {
+  function buildClient() {
+    const config = buildConfigStore({ wordpress: { instances: [INSTANCE] } });
+    const { ctx } = buildCtx({
+      "@cinatra-ai/host:connector-config": config.impl,
+      "nango-system": buildNango(),
+      "@cinatra-ai/host:instance-connection-gate": buildGate(),
+    });
+    return createWordPressClient(ctx);
+  }
+
+  it("readWordPressPostStatus routes postType:'page' to /wp/v2/pages/{id}", async () => {
+    const client = buildClient();
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: 81, status: "publish", link: "https://site.example/uat-page" }));
+    const res = await client.readWordPressPostStatus({ instance: INSTANCE, wordpressPostId: 81, postType: "page" });
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("rest_route=%2Fwp%2Fv2%2Fpages%2F81");
+    expect(url).not.toContain("%2Fposts%2F");
+    expect(res).toMatchObject({ id: 81, status: "publish" });
+  });
+
+  it("readWordPressPostStatus still routes posts (no postType) to /wp/v2/posts/{id}", async () => {
+    const client = buildClient();
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: 82, status: "draft" }));
+    await client.readWordPressPostStatus({ instance: INSTANCE, wordpressPostId: 82 });
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("rest_route=%2Fwp%2Fv2%2Fposts%2F82");
+    expect(url).not.toContain("%2Fpages%2F");
+  });
+
+  it("deleteWordPressPost routes postType:'page' to a DELETE on /wp/v2/pages/{id}", async () => {
+    const client = buildClient();
+    fetchMock.mockResolvedValueOnce(jsonResponse({ deleted: true, previous: { status: "publish" } }));
+    const res = await client.deleteWordPressPost({ instance: INSTANCE, wordpressPostId: 81, postType: "page" });
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.method).toBe("DELETE");
+    expect(url).toContain("rest_route=%2Fwp%2Fv2%2Fpages%2F81");
+    expect(url).not.toContain("%2Fposts%2F");
+    expect(res).toEqual({ deleted: true, previousStatus: "publish" });
+  });
+
+  it("deleteWordPressPost still routes posts (no postType) to a DELETE on /wp/v2/posts/{id}", async () => {
+    const client = buildClient();
+    fetchMock.mockResolvedValueOnce(jsonResponse({ deleted: true, previous: { status: "draft" } }));
+    await client.deleteWordPressPost({ instance: INSTANCE, wordpressPostId: 82 });
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("rest_route=%2Fwp%2Fv2%2Fposts%2F82");
+    expect(url).not.toContain("%2Fpages%2F");
+  });
+});
+
 describe("saveWordPressInstanceFromNangoConnection — the UNGATED materializer path", () => {
   it("never calls the use-gate (route machinery owns authorization) and preserves existing bindings", async () => {
     const existing = { ...INSTANCE, blogConnectorId: "site-connector-a" };

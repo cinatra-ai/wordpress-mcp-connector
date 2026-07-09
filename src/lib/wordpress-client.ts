@@ -307,10 +307,12 @@ export type WordPressClient = {
   readWordPressPostStatus(input: {
     instance: WordPressInstanceSettings;
     wordpressPostId: number;
+    postType?: string;
   }): Promise<WordPressPostStatusRecord>;
   deleteWordPressPost(input: {
     instance: WordPressInstanceSettings;
     wordpressPostId: number;
+    postType?: string;
   }): Promise<{ deleted: boolean; previousStatus?: string }>;
   updateWordPressDraftMeta(input: {
     instance: WordPressInstanceSettings;
@@ -1318,13 +1320,19 @@ export function createWordPressClient(ctx: ExtensionHostContext): WordPressClien
   async function readWordPressPostStatus(input: {
     instance: WordPressInstanceSettings;
     wordpressPostId: number;
+    postType?: string;
   }) {
     const auth = await resolveWordPressBasicAuth(input.instance);
+    // Pages live under /pages/{id}; posts under /posts/{id} (mirror the
+    // read/update post-type routing so status is correct for pages).
+    const restPath = input.postType === "page"
+      ? `/pages/${input.wordpressPostId}`
+      : `/posts/${input.wordpressPostId}`;
     await writeWordPressLogFile({
       label: "wordpress-post-status",
       kind: "request",
       body: {
-        endpoint: buildRESTEndpoint(input.instance.siteUrl, `/posts/${input.wordpressPostId}`, new URLSearchParams({ context: "edit" })),
+        endpoint: buildRESTEndpoint(input.instance.siteUrl, restPath, new URLSearchParams({ context: "edit" })),
         method: "GET",
         siteUrl: input.instance.siteUrl,
         username: auth.username,
@@ -1332,7 +1340,7 @@ export function createWordPressClient(ctx: ExtensionHostContext): WordPressClien
     });
 
     const response = await fetchWithTimeout(
-      buildRESTEndpoint(input.instance.siteUrl, `/posts/${input.wordpressPostId}`, new URLSearchParams({ context: "edit" })),
+      buildRESTEndpoint(input.instance.siteUrl, restPath, new URLSearchParams({ context: "edit" })),
       {
         method: "GET",
         headers: {
@@ -1377,20 +1385,26 @@ export function createWordPressClient(ctx: ExtensionHostContext): WordPressClien
   async function deleteWordPressPost(input: {
     instance: WordPressInstanceSettings;
     wordpressPostId: number;
+    postType?: string;
   }) {
     const auth = await resolveWordPressBasicAuth(input.instance);
+    // Pages live under /pages/{id}; posts under /posts/{id} (mirror the
+    // read/update post-type routing so the delete targets the right collection).
+    const restPath = input.postType === "page"
+      ? `/pages/${input.wordpressPostId}`
+      : `/posts/${input.wordpressPostId}`;
     await writeWordPressLogFile({
       label: "wordpress-delete-post",
       kind: "request",
       body: {
-        endpoint: buildRESTEndpoint(input.instance.siteUrl, `/posts/${input.wordpressPostId}`),
+        endpoint: buildRESTEndpoint(input.instance.siteUrl, restPath),
         method: "DELETE",
         siteUrl: input.instance.siteUrl,
         username: auth.username,
       },
     });
 
-    const response = await fetchWithTimeout(buildRESTEndpoint(input.instance.siteUrl, `/posts/${input.wordpressPostId}`), {
+    const response = await fetchWithTimeout(buildRESTEndpoint(input.instance.siteUrl, restPath), {
       method: "DELETE",
       headers: {
         Authorization: auth.authHeader,

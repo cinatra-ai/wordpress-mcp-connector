@@ -202,10 +202,11 @@ export interface WordPressConnectorDeps {
     wordpressPostId: number;
     postType?: string;
   }) => Promise<WordPressPostRead>;
-  /** Read one post's publish status. */
+  /** Read one post's publish status (`postType: "page"` routes to /pages/{id}). */
   readPostStatus: (input: {
     instance: WordPressMcpInstance;
     wordpressPostId: number;
+    postType?: string;
   }) => Promise<{ id: number; status: string; adminUrl: string; publicUrl?: string }>;
   /** List published posts (metadata-only, offset-paginated). */
   listPublishedPosts: (
@@ -223,10 +224,11 @@ export interface WordPressConnectorDeps {
     items: Array<{ id: number; title: string; status: string; date: string; url: string }>;
     total: number;
   }>;
-  /** WRITER — delete a post on the instance. */
+  /** WRITER — delete a post on the instance (`postType: "page"` routes to /pages/{id}). */
   deletePost: (input: {
     instance: WordPressMcpInstance;
     wordpressPostId: number;
+    postType?: string;
   }) => Promise<{ deleted: boolean; previousStatus?: string }>;
   /** WRITER — upload media (featured images). */
   uploadMedia: (input: {
