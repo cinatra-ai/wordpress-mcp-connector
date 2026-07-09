@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import NangoFrontend from "@nangohq/frontend";
 import type { NangoFrontendConfig } from "@cinatra-ai/sdk-ui/marketplace";
+import { toast } from "@cinatra-ai/sdk-ui/toast";
 import { Button } from "./components/ui/button";
 import { LinkIcon } from "lucide-react";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "./components/ui/input-group";
@@ -18,7 +19,6 @@ export function WordPressNangoConnectCard({
   const router = useRouter();
   const [siteUrl, setSiteUrl] = useState("");
   const [pending, setPending] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const ready = connectionServiceReady ?? Boolean(nangoFrontendConfig?.apiURL);
 
   async function handleConnect() {
@@ -33,12 +33,11 @@ export function WordPressNangoConnectCard({
     }
 
     if (!normalizedSiteUrl) {
-      setErrorMessage("Enter the WordPress site domain first.");
+      toast.error("Enter the WordPress site domain first.");
       return;
     }
 
     setPending(true);
-    setErrorMessage(null);
 
     try {
       const nangoFrontend = new NangoFrontend();
@@ -71,13 +70,13 @@ export function WordPressNangoConnectCard({
               router.refresh();
             } catch (error) {
               setPending(false);
-              setErrorMessage(error instanceof Error ? error.message : "Unable to save the WordPress connection.");
+              toast.error(error instanceof Error ? error.message : "Unable to save the WordPress connection.");
             }
           }
 
           if (event.type === "error") {
             setPending(false);
-            setErrorMessage(event.payload.errorMessage || "Authorization failed.");
+            toast.error(event.payload.errorMessage || "Authorization failed.");
           }
 
           if (event.type === "close") {
@@ -103,7 +102,7 @@ export function WordPressNangoConnectCard({
       connect.setSessionToken(payload.sessionToken);
     } catch (error) {
       setPending(false);
-      setErrorMessage(error instanceof Error ? error.message : "Unable to open the connection flow.");
+      toast.error(error instanceof Error ? error.message : "Unable to open the connection flow.");
     }
   }
 
@@ -118,10 +117,6 @@ export function WordPressNangoConnectCard({
         </div>
         <span className="badge rounded-full px-3 py-1 text-xs uppercase">Preferred</span>
       </div>
-
-      {errorMessage ? (
-        <div className="mt-4 rounded-control border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">{errorMessage}</div>
-      ) : null}
 
       <div className="mt-5 flex flex-wrap gap-3">
         <InputGroup className="min-w-[18rem] flex-1">
