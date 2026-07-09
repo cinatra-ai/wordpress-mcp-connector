@@ -69,18 +69,12 @@ describe("register(ctx) — transport-DI deps binding (Stage 3)", () => {
   it("binds the connection-admin + content members LAZILY against wordpress-mcp AND wordpress-content (cinatra#172 Stage H3)", async () => {
     const getAPIStatus = vi.fn(() => ({ status: "connected" as const, detail: "1 instance" }));
     const createDraft = vi.fn(async () => ({ wordpressPostId: 10, adminUrl: "a" }));
-    const readPost = vi.fn(async () => ({
-      id: 10, status: "draft", title: "T", content: "C", excerpt: "E", adminUrl: "a",
-    }));
     const readPostStatus = vi.fn(async () => ({ id: 10, status: "draft", adminUrl: "a" }));
     const listPublishedPosts = vi.fn(async () => ({ items: [], total: 0 }));
     const listPublishedPages = vi.fn(async () => ({ items: [], total: 0 }));
     const deletePost = vi.fn(async () => ({ deleted: true }));
     const uploadMedia = vi.fn(async () => ({ mediaId: 7 }));
     const updateDraftMeta = vi.fn(async () => ({ id: 10 }));
-    const updatePost = vi.fn(async () => ({
-      id: 10, status: "draft", title: "T", content: "C", excerpt: "E", adminUrl: "a",
-    }));
     const { resolveProviders } = activateWithServices({
       "@cinatra-ai/host:wordpress-mcp": {
         listInstances: vi.fn(() => []),
@@ -92,14 +86,12 @@ describe("register(ctx) — transport-DI deps binding (Stage 3)", () => {
       },
       "@cinatra-ai/host:wordpress-content": {
         createDraft,
-        readPost,
         readPostStatus,
         listPublishedPosts,
         listPublishedPages,
         deletePost,
         uploadMedia,
         updateDraftMeta,
-        updatePost,
       },
     });
     // Slot bound at activation, BEFORE any settings-page render / MCP handler
@@ -114,11 +106,6 @@ describe("register(ctx) — transport-DI deps binding (Stage 3)", () => {
       wordpressPostId: 10,
     });
     expect(createDraft).toHaveBeenCalledWith({ instance, payload });
-
-    await expect(
-      getWordPressDeps().readPost({ instance, wordpressPostId: 10, postType: "page" }),
-    ).resolves.toMatchObject({ id: 10 });
-    expect(readPost).toHaveBeenCalledWith({ instance, wordpressPostId: 10, postType: "page" });
 
     await expect(getWordPressDeps().readPostStatus({ instance, wordpressPostId: 10 })).resolves.toEqual({
       id: 10,
@@ -148,11 +135,11 @@ describe("register(ctx) — transport-DI deps binding (Stage 3)", () => {
       getWordPressDeps().updateDraftMeta({ instance, wordpressPostId: 10, meta: { k: "v" } }),
     ).resolves.toEqual({ id: 10 });
 
-    const fields = { title: "X", status: "draft" as const };
-    await expect(
-      getWordPressDeps().updatePost({ instance, wordpressPostId: 10, fields }),
-    ).resolves.toMatchObject({ id: 10 });
-    expect(updatePost).toHaveBeenCalledWith({ instance, wordpressPostId: 10, fields });
+    // In-admin readPost/updatePost were RETIRED in cinatra#1214 S1 (the
+    // get/update reroute to callWordPressMcp); the deps slot no longer binds
+    // them. The auth seam the MCP client uses IS bound (from the connector's
+    // own client) — a lazy function, resolved on call.
+    expect(typeof getWordPressDeps().buildWordPressBasicAuthHeader).toBe("function");
 
     expect(getAPIStatus).toHaveBeenCalledTimes(1);
   });
@@ -271,13 +258,18 @@ describe("register(ctx) — relocated WordPress client provider-flip (cinatra#97
     registeredImpl(registerProvider, "@cinatra-ai/host:wordpress-widget-auth");
 
     const content = registeredImpl(registerProvider, "@cinatra-ai/host:wordpress-content");
-    // The FULL existing HostWordPressContentService member set.
+    // The existing HostWordPressContentService member set MINUS the in-admin
+    // readPost/updatePost, which cinatra#1214 S1 RETIRED (the get/update reroute
+    // to the MCP client — the client no longer has readWordPressPost/
+    // updateWordPressPost to back them).
     for (const member of [
-      "createDraft", "readPost", "readPostStatus", "listPublishedPosts",
-      "listPublishedPages", "deletePost", "uploadMedia", "updateDraftMeta", "updatePost",
+      "createDraft", "readPostStatus", "listPublishedPosts",
+      "listPublishedPages", "deletePost", "uploadMedia", "updateDraftMeta",
     ]) {
       expect(typeof content[member], `wordpress-content.${member}`).toBe("function");
     }
+    expect(content.readPost, "wordpress-content.readPost retired (S1)").toBeUndefined();
+    expect(content.updatePost, "wordpress-content.updatePost retired (S1)").toBeUndefined();
 
     const admin = registeredImpl(registerProvider, "@cinatra-ai/host:wordpress-mcp");
     // Client-backed contract members…

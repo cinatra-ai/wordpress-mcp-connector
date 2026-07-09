@@ -116,21 +116,6 @@ export type WordPressWritableDraftPayload = {
   featured_media?: number;
 };
 
-/** Post read shape (host `readWordPressPost` return). */
-export type WordPressPostRead = {
-  id: number;
-  status: string;
-  title: string;
-  content: string;
-  excerpt: string;
-  slug?: string;
-  link?: string;
-  featured_media?: number;
-  categories?: number[];
-  tags?: number[];
-  adminUrl: string;
-};
-
 /** Probe verdict for a WP mcp-adapter endpoint (host-bound cached probe). */
 export type WordPressMcpProbeStatus = "registered" | "not_installed" | "auth_error" | "unreachable";
 
@@ -185,23 +170,35 @@ export interface WordPressConnectorDeps {
   //      cinatra#172 Stage H3 — `@/lib/wordpress-api` stays host-side) ----
   /** Aggregate status for the `wordpress_status` primitive (host-bound). */
   getApiStatus: () => WordPressApiStatus;
+  // ---- in-admin MCP content-client auth seam (cinatra#1214 S1) ----
+  /**
+   * Resolve the WordPress Application-Password Basic auth header for the site's
+   * MCP content server, HOST-SIDE through the connector's relocated client
+   * (`resolveWordPressBasicAuth` → Nango credential + the #1077
+   * instance-connection use-gate + audit `source:"wordpress-api"`). Consumed by
+   * `callWordPressMcp` (src/lib/wordpress-mcp-client.ts) so the in-admin
+   * read/update reach WordPress ONLY through its MCP integration, using the SAME
+   * credential + use-gate + audit semantics the direct REST client used — only
+   * the transport changes. THROWS fail-closed on a use-gate deny or a missing
+   * credential; the resolved password never crosses back to the connector (only
+   * the ready-to-send `Authorization` header does).
+   */
+  buildWordPressBasicAuthHeader: (input: {
+    instance: WordPressMcpInstance;
+  }) => Promise<{ Authorization: string }>;
   // ---- post/media content surface (`@cinatra-ai/host:wordpress-content`,
   //      cinatra#172 Stage H3). Host-side Basic-auth resolution (Nango on the
   //      row's credential binding) runs inside each member. The WRITERS
-  //      (createDraft/deletePost/uploadMedia/updateDraftMeta/updatePost) are
-  //      only ever reached through the host's MCP dispatch + actor gating —
-  //      the identical posture the static imports carried. ----
+  //      (createDraft/deletePost/uploadMedia/updateDraftMeta) are only ever
+  //      reached through the host's MCP dispatch + actor gating — the identical
+  //      posture the static imports carried. (The in-admin `readPost`/`updatePost`
+  //      members were RETIRED in cinatra#1214 S1 — the get/update reroute to the
+  //      MCP client; see `buildWordPressBasicAuthHeader` above.) ----
   /** WRITER — create a draft post on the instance. */
   createDraft: (input: {
     instance: WordPressMcpInstance;
     payload: WordPressWritableDraftPayload;
   }) => Promise<{ wordpressPostId: number; publicUrl?: string; adminUrl: string }>;
-  /** Read one post (edit context; `postType: "page"` routes to /pages). */
-  readPost: (input: {
-    instance: WordPressMcpInstance;
-    wordpressPostId: number;
-    postType?: string;
-  }) => Promise<WordPressPostRead>;
   /** Read one post's publish status (`postType: "page"` routes to /pages/{id}). */
   readPostStatus: (input: {
     instance: WordPressMcpInstance;
@@ -243,26 +240,6 @@ export interface WordPressConnectorDeps {
     wordpressPostId: number;
     meta: Record<string, unknown>;
   }) => Promise<unknown>;
-  /** WRITER — top-level field updates (title/content/excerpt/status/meta). */
-  updatePost: (input: {
-    instance: WordPressMcpInstance;
-    wordpressPostId: number;
-    postType?: string;
-    fields: {
-      title?: string;
-      content?: string;
-      excerpt?: string;
-      status?: "publish" | "future" | "draft" | "pending" | "private";
-      meta?: Record<string, unknown>;
-    };
-  }) => Promise<{
-    id: number;
-    status: string;
-    title: string;
-    content: string;
-    excerpt: string;
-    adminUrl: string;
-  }>;
   // ---- per-user write-authority gate (cinatra#409; host-bound) ----
   /**
    * WRITE AUTHZ — per-user / per-connector-instance entitlement gate. EVERY

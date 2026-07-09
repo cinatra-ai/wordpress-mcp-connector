@@ -29,6 +29,7 @@
     "lint": "eslint . --no-inline-config"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@nangohq/frontend": "^0.70.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

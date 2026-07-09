@@ -319,41 +319,24 @@ export type WordPressClient = {
     wordpressPostId: number;
     meta: Record<string, unknown>;
   }): Promise<unknown>;
-  updateWordPressPost(input: {
-    instance: WordPressInstanceSettings;
-    wordpressPostId: number;
-    postType?: string;
-    fields: {
-      title?: string;
-      content?: string;
-      excerpt?: string;
-      status?: "publish" | "future" | "draft" | "pending" | "private";
-      meta?: Record<string, unknown>;
-    };
-  }): Promise<{
-    id: number;
-    status: string;
-    title: string;
-    content: string;
-    excerpt: string;
-    adminUrl: string;
-  }>;
-  readWordPressPost(input: {
-    instance: WordPressInstanceSettings;
-    wordpressPostId: number;
-    postType?: string;
-  }): Promise<{
-    id: number;
-    status: string;
-    title: string;
-    content: string;
-    excerpt: string;
-    slug?: string;
-    link?: string;
-    featured_media?: number;
-    categories?: number[];
-    tags?: number[];
-    adminUrl: string;
+  /**
+   * Resolve the Application-Password Basic auth for an instance (Nango
+   * credential + the #1077 instance-connection use-gate + audit
+   * `source:"wordpress-api"`). Exposed for the in-admin MCP content client's
+   * auth seam (cinatra#1214 S1, bound as `buildWordPressBasicAuthHeader`) so the
+   * in-admin get/update authenticate the MCP content server with the SAME
+   * credential + use-gate + audit the direct REST client used. The carve-out
+   * REST members call the same internal resolver.
+   *
+   * NOTE (cinatra#1214 S1): the direct-REST `readWordPressPost` /
+   * `updateWordPressPost` helpers were DELETED — the in-admin get/update reroute
+   * to the site's MCP integration (`callWordPressMcp`). No production caller
+   * used those helpers outside the two in-admin primitives (org-wide grep).
+   */
+  resolveWordPressBasicAuth(instance: WordPressInstanceSettings): Promise<{
+    username: string;
+    applicationPassword: string;
+    authHeader: string;
   }>;
   uploadWordPressMedia(input: {
     instance: WordPressInstanceSettings;
@@ -1483,142 +1466,18 @@ export function createWordPressClient(ctx: ExtensionHostContext): WordPressClien
     return payload;
   }
 
-  /**
-   * Top-level WordPress post update.
-   *
-   * Unlike updateWordPressDraftMeta (which only POSTs `{ meta }`), this helper
-   * forwards top-level fields (title, content, excerpt, status, meta) to the
-   * WordPress REST API. Required by the wordpress_post_update MCP primitive
-   * which the wordpress-content-editor SKILL.md uses for the demote-then-edit
-   * pattern.
-   *
-   * Only the fields present in `input.fields` are sent; undefined fields are
-   * stripped so WordPress does not overwrite existing values with empty strings.
-   */
-  async function updateWordPressPost(input: {
-    instance: WordPressInstanceSettings;
-    wordpressPostId: number;
-    postType?: string;
-    fields: {
-      title?: string;
-      content?: string;
-      excerpt?: string;
-      status?: "publish" | "future" | "draft" | "pending" | "private";
-      meta?: Record<string, unknown>;
-    };
-  }) {
-    const auth = await resolveWordPressBasicAuth(input.instance);
-
-    // Strip undefined fields so WordPress only updates what the caller specified.
-    // Also guard content/excerpt against empty strings — WordPress applies them
-    // literally and would wipe the body if an LLM passes content:"" for a field
-    // it wasn't asked to change.
-    const body: Record<string, unknown> = {};
-    if (typeof input.fields.title === "string") body.title = input.fields.title;
-    if (typeof input.fields.content === "string" && input.fields.content.length > 0) body.content = input.fields.content;
-    if (typeof input.fields.excerpt === "string" && input.fields.excerpt.length > 0) body.excerpt = input.fields.excerpt;
-    if (typeof input.fields.status === "string") body.status = input.fields.status;
-    if (input.fields.meta && typeof input.fields.meta === "object") body.meta = input.fields.meta;
-
-    // Use the correct REST route for the post type (pages live under /pages/, not /posts/).
-    const restPath = input.postType === "page"
-      ? `/pages/${input.wordpressPostId}`
-      : `/posts/${input.wordpressPostId}`;
-
-    await writeWordPressLogFile({
-      label: "wordpress-update-post",
-      kind: "request",
-      body: {
-        endpoint: buildRESTEndpoint(input.instance.siteUrl, restPath),
-        method: "POST",
-        siteUrl: input.instance.siteUrl,
-        username: auth.username,
-        body,
-      },
-    });
-
-    const response = await fetchWithTimeout(buildRESTEndpoint(input.instance.siteUrl, restPath), {
-      method: "POST",
-      headers: {
-        Authorization: auth.authHeader,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify(body),
-      cache: "no-store",
-    });
-
-    const payload = (await response.json().catch(() => null)) as
-      | (WordPressPostRecord & { message?: string })
-      | null;
-    await writeWordPressLogFile({
-      label: "wordpress-update-post",
-      kind: "response",
-      body: {
-        status: response.status,
-        body: payload,
-      },
-    });
-
-    if (!response.ok || !payload?.id) {
-      throw new Error(payload?.message || "Unable to update the WordPress post.");
-    }
-
-    return {
-      id: payload.id,
-      status: typeof payload.status === "string" && payload.status.trim() ? payload.status : "unknown",
-      title: payload.title?.rendered ?? payload.title?.raw ?? "",
-      content: payload.content?.rendered ?? payload.content?.raw ?? "",
-      excerpt: payload.excerpt?.rendered ?? payload.excerpt?.raw ?? "",
-      adminUrl: `${normalizeSiteUrl(input.instance.siteUrl)}/wp-admin/post.php?post=${payload.id}&action=edit`,
-    };
-  }
-
-  async function readWordPressPost(input: {
-    instance: WordPressInstanceSettings;
-    wordpressPostId: number;
-    postType?: string;
-  }) {
-    const auth = await resolveWordPressBasicAuth(input.instance);
-    // Use the correct REST route for the post type (pages live under /pages/, not /posts/).
-    const restPath = input.postType === "page"
-      ? `/pages/${input.wordpressPostId}`
-      : `/posts/${input.wordpressPostId}`;
-    const response = await fetchWithTimeout(
-      buildRESTEndpoint(input.instance.siteUrl, restPath, new URLSearchParams({ context: "edit" })),
-      {
-        method: "GET",
-        headers: {
-          Authorization: auth.authHeader,
-          Accept: "application/json",
-        },
-        cache: "no-store",
-      },
-    );
-
-    const payload = (await response.json().catch(() => null)) as (WordPressPostRecord & { message?: string; code?: string }) | null;
-
-    if (response.status === 404 || payload?.code === "rest_post_invalid_id") {
-      throw new Error(`WordPress post ${input.wordpressPostId} not found.`);
-    }
-    if (!response.ok || !payload?.id) {
-      throw new Error(payload?.message || "Unable to read the WordPress post.");
-    }
-
-    return {
-      id: payload.id,
-      status: payload.status ?? "unknown",
-      title: payload.title?.rendered ?? payload.title?.raw ?? "",
-      content: payload.content?.raw ?? payload.content?.rendered ?? "",
-      excerpt: payload.excerpt?.rendered ?? payload.excerpt?.raw ?? "",
-      slug: payload.slug,
-      link: payload.link,
-      featured_media: payload.featured_media,
-      categories: payload.categories,
-      tags: payload.tags,
-      adminUrl: `${normalizeSiteUrl(input.instance.siteUrl)}/wp-admin/post.php?post=${payload.id}&action=edit`,
-    };
-  }
+  // cinatra#1214 S1 — the direct-REST in-admin get/update helpers
+  // (`updateWordPressPost` → `POST /wp/v2/(posts|pages)/{id}` and
+  // `readWordPressPost` → `GET /wp/v2/(posts|pages)/{id}?context=edit`) were
+  // DELETED. The in-admin `wordpress_post_get` / `wordpress_post_update`
+  // primitives now reach WordPress content ONLY through the site's MCP
+  // integration (`callWordPressMcp` → the plugin's `cinatra-post-get` /
+  // `cinatra-post-update` tools), so no direct `/wp/v2/*` egress with a stored
+  // credential remains on the in-admin path. The carve-out members
+  // (createDraft / uploadMedia / updateDraftMeta / deletePost / readPostStatus /
+  // listPublished*) keep their direct-REST path per the design §C carve-out.
+  // `resolveWordPressBasicAuth` is now ALSO exposed (below, in the return) as
+  // the MCP client's Basic-auth seam.
 
   function inferFileExtension(mimeType: string) {
     switch (mimeType) {
@@ -1892,8 +1751,7 @@ export function createWordPressClient(ctx: ExtensionHostContext): WordPressClien
     readWordPressPostStatus,
     deleteWordPressPost,
     updateWordPressDraftMeta,
-    updateWordPressPost,
-    readWordPressPost,
+    resolveWordPressBasicAuth,
     uploadWordPressMedia,
     listWordPressWebhookSubscriptions,
     registerWordPressWebhookSubscription,

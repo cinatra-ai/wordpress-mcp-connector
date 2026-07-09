@@ -54,7 +54,7 @@ const TOOL_META: Record<string, { description: string; inputSchema: z.ZodTypeAny
     inputSchema: postsListSchema,
   },
   "wordpress_post_get": {
-    description: "Get a WordPress post by ID. Returns the post's title, status, excerpt, slug, link, featured media, categories, tags, and admin URL.",
+    description: "Get a WordPress post by ID for in-admin editing, through the site's MCP content server (not a direct REST call). Returns the post's title, status, content, excerpt, slug, link, and admin URL. For a WordPress page, pass postType: \"page\".",
     inputSchema: postStatusSchema,
   },
   "wordpress_post_update_meta": {
@@ -64,7 +64,7 @@ const TOOL_META: Record<string, { description: string; inputSchema: z.ZodTypeAny
   },
   "wordpress_post_update": {
     description:
-      "Update a WordPress post's top-level fields (title, content, excerpt, status, meta). Sends a POST to /wp/v2/posts/{id} with all provided fields. Used by the wordpress-content-editor agent's demote-then-edit pattern: passing { status: 'draft', title, content } in one call demotes a published post AND applies edits, leaving the previous live revision in WordPress's revision history. Requires at least one editable field (title/content/excerpt/status/meta). Returns { id, status, title, content, excerpt, adminUrl }. For meta-only updates, prefer wordpress_post_update_meta.",
+      "Update a WordPress post's top-level fields (title, content, excerpt, status). Applies the provided fields to the post through the site's MCP content server (the in-admin editing path), not a direct REST call. Used by the wordpress-content-editor agent's demote-then-edit pattern: passing { status: 'draft', title, content } in one call demotes a published post AND applies edits, leaving the previous live revision in WordPress's revision history. Requires at least one editable field (title/content/excerpt/status). Returns { id, status, title, content, excerpt, adminUrl }. For post meta updates, use wordpress_post_update_meta.",
     inputSchema: postUpdateSchema,
   },
   "wordpress_content_editor_run": {

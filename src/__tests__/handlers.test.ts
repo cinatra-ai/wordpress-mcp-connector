@@ -8,6 +8,15 @@ import {
   type WordPressMcpInstance,
 } from "../deps";
 
+// The in-admin get/update reroute to the MCP client (cinatra#1214 S1) — mocked
+// so these handler tests assert the MCP tool call, not a live MCP transport.
+vi.mock("../lib/wordpress-mcp-client", () => ({
+  callWordPressMcp: vi.fn(),
+  CINATRA_POST_GET_TOOL: "cinatra-post-get",
+  CINATRA_POST_UPDATE_TOOL: "cinatra-post-update",
+}));
+import { callWordPressMcp } from "../lib/wordpress-mcp-client";
+
 // All host surfaces resolve through the deps SLOT (cinatra#172 Stage H3): the
 // instance/status reads, the post/media content CRUD, the pagination helpers
 // and the content-editor A2A dispatch are host-bound members the suite stubs
@@ -21,7 +30,6 @@ const dispatchContentEditorMock = vi.fn(
     packageName: string;
   }) => "{}",
 );
-const updatePostMock = vi.fn();
 const updateDraftMetaMock = vi.fn();
 // cinatra#409 per-user write-authority gate. Default: ALLOW (resolves void).
 // The deny/forged-org/unbound suites below override this per-case.
@@ -57,15 +65,16 @@ function registerStubDeps(extra: Partial<WordPressConnectorDeps> = {}) {
     isPrivateUrl: () => false,
     // Connection/instance-admin + content surface (cinatra#172 Stage H3).
     getApiStatus: vi.fn(() => ({ status: "not_connected" as const, detail: "" })),
+    // In-admin get/update auth seam (cinatra#1214 S1). The real MCP call is
+    // mocked (vi.mock above); this only needs to exist on the deps slot.
+    buildWordPressBasicAuthHeader: vi.fn(async () => ({ Authorization: "Basic test" })),
     createDraft: vi.fn(),
-    readPost: vi.fn(),
     readPostStatus: vi.fn(),
     listPublishedPosts: vi.fn(async () => ({ items: [], total: 0 })),
     listPublishedPages: vi.fn(async () => ({ items: [], total: 0 })),
     deletePost: vi.fn(async () => ({ deleted: true })),
     uploadMedia: vi.fn(),
     updateDraftMeta: updateDraftMetaMock,
-    updatePost: updatePostMock,
     requireInstanceWriteAuthority: requireInstanceWriteAuthorityMock,
     ...extra,
   });
@@ -279,8 +288,10 @@ describe("wordpress_post_update", () => {
     _resetWordPressDepsForTests();
     registerStubDeps();
     handlers = createWordPressPrimitiveHandlers();
-    updatePostMock.mockReset();
-    updatePostMock.mockResolvedValue({ id: 10, status: "draft" });
+    // The reroute (cinatra#1214 S1): wordpress_post_update dispatches to the MCP
+    // client (cinatra-post-update), NOT the retired updatePost REST dep.
+    vi.mocked(callWordPressMcp).mockReset();
+    vi.mocked(callWordPressMcp).mockResolvedValue({ id: 10, status: "draft", title: "", content: "", excerpt: "" });
     // cinatra#409: the gate is invoked by every write primitive; default ALLOW.
     requireInstanceWriteAuthorityMock.mockReset();
     requireInstanceWriteAuthorityMock.mockResolvedValue(undefined);
@@ -314,22 +325,21 @@ describe("wordpress_post_update", () => {
     ).rejects.toThrow();
   });
 
-  it("forwards top-level title to updateWordPressPost (NOT inside meta)", async () => {
+  it("forwards top-level title to the cinatra-post-update MCP tool (NOT inside meta)", async () => {
     await (handlers as any).wordpress_post_update({
       primitiveName: "wordpress_post_update",
       input: { instanceId: "site-1", postId: 10, title: "Hello" },
       actor: { actorType: "model", source: "agent" },
       mode: "agentic",
     });
-    expect(updatePostMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        wordpressPostId: 10,
-        fields: expect.objectContaining({ title: "Hello" }),
-      }),
+    expect(callWordPressMcp).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "site-1" }),
+      "cinatra-post-update",
+      { id: 10, title: "Hello" },
     );
-    // Defensive: title should NOT be inside meta
-    const call = updatePostMock.mock.calls[0][0];
-    expect(call.fields.meta?.title).toBeUndefined();
+    // Defensive: the tool args carry no meta key.
+    const args = vi.mocked(callWordPressMcp).mock.calls[0][2] as Record<string, unknown>;
+    expect(args).not.toHaveProperty("meta");
   });
 
   it("supports demote-then-edit: status:draft + title in one call (the SKILL.md pattern)", async () => {
@@ -339,19 +349,56 @@ describe("wordpress_post_update", () => {
       actor: { actorType: "model", source: "agent" },
       mode: "agentic",
     });
-    const call = updatePostMock.mock.calls[0][0];
-    expect(call.fields).toEqual({ status: "draft", title: "X", content: "Y" });
+    const args = vi.mocked(callWordPressMcp).mock.calls[0][2];
+    expect(args).toEqual({ id: 10, status: "draft", title: "X", content: "Y" });
   });
 
-  it("coerces string postId to number via Zod coerce", async () => {
+  it("coerces string postId to number via Zod coerce (as the MCP tool's id)", async () => {
     await (handlers as any).wordpress_post_update({
       primitiveName: "wordpress_post_update",
       input: { instanceId: "site-1", postId: "10", title: "X" },
       actor: { actorType: "model", source: "agent" },
       mode: "agentic",
     });
-    const call = updatePostMock.mock.calls[0][0];
-    expect(call.wordpressPostId).toBe(10);  // numeric, not string
+    const args = vi.mocked(callWordPressMcp).mock.calls[0][2] as { id: number };
+    expect(args.id).toBe(10); // numeric, not string
+  });
+
+  it("runs the #409 write-authority gate BEFORE the MCP write", async () => {
+    await (handlers as any).wordpress_post_update({
+      primitiveName: "wordpress_post_update",
+      input: { instanceId: "site-1", postId: 10, title: "X" },
+      actor: { actorType: "model", source: "agent" },
+      mode: "agentic",
+    });
+    expect(requireInstanceWriteAuthorityMock).toHaveBeenCalledWith(
+      expect.objectContaining({ instanceId: "site-1", primitiveName: "wordpress_post_update" }),
+    );
+  });
+
+  it("FAILS CLOSED on meta (the MCP ability has no meta) — throws, routes to wordpress_post_update_meta, no MCP call", async () => {
+    await expect(
+      (handlers as any).wordpress_post_update({
+        primitiveName: "wordpress_post_update",
+        input: { instanceId: "site-1", postId: 10, meta: { _yoast_wpseo_metadesc: "x" } },
+        actor: { actorType: "model", source: "agent" },
+        mode: "agentic",
+      }),
+    ).rejects.toThrow(/wordpress_post_update_meta|cannot write post meta/);
+    expect(callWordPressMcp).not.toHaveBeenCalled();
+  });
+
+  it("strips an empty-string excerpt before dispatch (never wipes a field via literal '')", async () => {
+    // content has schema min(1); excerpt does not, so an empty excerpt reaches
+    // the handler and must be dropped rather than sent as a literal "".
+    await (handlers as any).wordpress_post_update({
+      primitiveName: "wordpress_post_update",
+      input: { instanceId: "site-1", postId: 10, title: "T", excerpt: "" },
+      actor: { actorType: "model", source: "agent" },
+      mode: "agentic",
+    });
+    const args = vi.mocked(callWordPressMcp).mock.calls[0][2] as Record<string, unknown>;
+    expect(args).toEqual({ id: 10, title: "T" });
   });
 });
 
