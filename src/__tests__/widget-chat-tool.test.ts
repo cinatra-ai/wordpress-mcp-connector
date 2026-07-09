@@ -37,15 +37,14 @@ function registerStubDeps() {
     // Connection/instance-admin + content surface (cinatra#172 Stage H3 —
     // unused by this suite's code paths).
     getApiStatus: () => ({ status: "not_connected" as const, detail: "" }),
+    buildWordPressBasicAuthHeader: vi.fn(async () => ({ Authorization: "Basic test" })),
     createDraft: vi.fn(),
-    readPost: vi.fn(),
     readPostStatus: vi.fn(),
     listPublishedPosts: vi.fn(async () => ({ items: [], total: 0 })),
     listPublishedPages: vi.fn(async () => ({ items: [], total: 0 })),
     deletePost: vi.fn(async () => ({ deleted: true })),
     uploadMedia: vi.fn(),
     updateDraftMeta: vi.fn(),
-    updatePost: vi.fn(),
     // cinatra#409 write-authority gate — the widget tool drives the
     // wordpress_content_editor_run RELAY (a DISPATCH, not a direct writer), so
     // this gate is unused on this suite's code path.

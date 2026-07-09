@@ -2,15 +2,26 @@ import { z } from "zod";
 import type { ExtensionPrimitiveRequest } from "@cinatra-ai/sdk-extensions";
 // Every host surface arrives through the host-bound deps slot (cinatra#172
 // Stage H3): instance/status reads from the extended
-// `@cinatra-ai/host:wordpress-mcp` service, the post/media CRUD from the NEW
-// `@cinatra-ai/host:wordpress-content` service, pagination from
+// `@cinatra-ai/host:wordpress-mcp` service, the carve-out post/media CRUD from
+// the `@cinatra-ai/host:wordpress-content` service, pagination from
 // `@cinatra-ai/host:mcp-pagination` — no `@/lib/wordpress-api` import.
+//
+// EXCEPT the two in-admin editing primitives: `wordpress_post_get` /
+// `wordpress_post_update` reach WordPress content ONLY through the site's MCP
+// integration (`callWordPressMcp` → the plugin's `cinatra-post-get` /
+// `cinatra-post-update` tools), never a direct `/wp/v2/*` REST call
+// (cinatra#1214 S1). The old `readPost`/`updatePost` direct-REST deps are gone.
 import {
   getWordPressDeps,
   listInstancesSorted,
   type WordPressMcpInstance,
   type WordPressMcpPublicInstance,
 } from "../deps";
+import {
+  callWordPressMcp,
+  CINATRA_POST_GET_TOOL,
+  CINATRA_POST_UPDATE_TOOL,
+} from "../lib/wordpress-mcp-client";
 
 // READ-BOUNDARY redaction. A read/list primitive must NEVER emit credential
 // material. This projection drops `applicationPassword` AND the
@@ -87,8 +98,8 @@ export const createDraftSchema = z.object({
 
 export const postStatusSchema = z.object({
   instanceId: z.string().min(1),
-  postId: z.number().int(),
-  postType: z.string().optional().describe("Post type slug — pass 'page' to target a WordPress page (routes to /wp/v2/pages/{id} instead of /posts/{id})."),
+  postId: z.coerce.number().int().positive().describe("WordPress post ID (string from widget coerced to number)"),
+  postType: z.string().optional().describe("Post type slug — pass 'page' to target a WordPress page instead of a post."),
 });
 
 export const uploadMediaSchema = z.object({
@@ -100,7 +111,7 @@ export const uploadMediaSchema = z.object({
 
 export const updateMetaSchema = z.object({
   instanceId: z.string().min(1),
-  postId: z.number().int(),
+  postId: z.coerce.number().int().positive().describe("WordPress post ID (string from widget coerced to number)"),
   meta: z.record(z.string(), z.unknown()),
 });
 
@@ -122,7 +133,7 @@ export const postUpdateSchema = z
   .object({
     instanceId: z.string().min(1),
     postId:     z.coerce.number().int().positive().describe("WordPress post ID (string from widget coerced to number)"),
-    postType:   z.string().optional().describe("Post type slug — 'page' uses /wp/v2/pages/{id} instead of /posts/{id}"),
+    postType:   z.string().optional().describe("Post type slug — 'page' targets a WordPress page instead of a post"),
     title:      z.string().optional(),
     // min(1) prevents the LLM from accidentally passing content:"" which WordPress applies literally,
     // wiping the entire post body. Omit content entirely when not changing it.
@@ -140,6 +151,123 @@ export const postUpdateSchema = z
       (val.meta !== undefined && typeof val.meta === "object"),
     { message: "At least one editable field (title, content, excerpt, status, meta) is required." },
   );
+
+// ---------------------------------------------------------------------------
+// In-admin MCP-primary content read/update (cinatra#1214 S1).
+//
+// The in-admin assistant reaches WordPress content ONLY through the site's MCP
+// integration: `wordpress_post_get` / `wordpress_post_update` route through
+// `callWordPressMcp` to the plugin-owned `cinatra-post-get` /
+// `cinatra-post-update` tools (cinatra-ai/wordpress-plugin #81), NEVER a direct
+// `/wp/v2/*` REST call. `callWordPressMcp` detects the tools at runtime and
+// throws fail-closed when the plugin is missing/too old — it never degrades to
+// direct REST. The per-user #409 write-authority gate stays in the handler
+// (transport-independent).
+// ---------------------------------------------------------------------------
+
+/** WordPress admin edit URL for a post/page id (the old REST client's shape). */
+function buildAdminUrl(siteUrl: string, postId: number): string {
+  return `${siteUrl.replace(/\/+$/, "")}/wp-admin/post.php?post=${postId}&action=edit`;
+}
+
+function asString(v: unknown): string {
+  return typeof v === "string" ? v : "";
+}
+
+/** The `cinatra-post-get` / `cinatra-post-update` ability payload shape. */
+type CinatraPostPayload = {
+  id?: unknown;
+  status?: unknown;
+  title?: unknown;
+  content?: unknown;
+  excerpt?: unknown;
+  slug?: unknown;
+  link?: unknown;
+};
+
+/** Read a post for editing over MCP. Returns the same field shape the old
+ * direct-REST `readWordPressPost` returned (the before-values the
+ * content-editor agent's field-diff reads), with `adminUrl` built
+ * connector-side. `postType:"page"` is forwarded so the plugin resolves a page. */
+async function readPostViaMcp(
+  instance: WordPressMcpInstance,
+  postId: number,
+  postType?: string,
+) {
+  const args: Record<string, unknown> = { id: postId };
+  if (postType !== undefined) args.postType = postType;
+  const raw = (await callWordPressMcp(instance, CINATRA_POST_GET_TOOL, args)) as CinatraPostPayload;
+  const id = Number(raw?.id);
+  const resolvedId = Number.isFinite(id) ? id : postId;
+  return {
+    id: resolvedId,
+    status: asString(raw?.status) || "unknown",
+    title: asString(raw?.title),
+    content: asString(raw?.content),
+    excerpt: asString(raw?.excerpt),
+    slug: typeof raw?.slug === "string" ? raw.slug : undefined,
+    link: typeof raw?.link === "string" ? raw.link : undefined,
+    adminUrl: buildAdminUrl(instance.siteUrl, resolvedId),
+  };
+}
+
+/** Update a post over MCP (title/content/excerpt/status; demote-then-edit via
+ * status:"draft"). Returns the same field shape the old direct-REST
+ * `updateWordPressPost` returned. */
+async function updatePostViaMcp(input: {
+  instance: WordPressMcpInstance;
+  postId: number;
+  postType?: string;
+  fields: {
+    title?: string;
+    content?: string;
+    excerpt?: string;
+    status?: "publish" | "future" | "draft" | "pending" | "private";
+    meta?: Record<string, unknown>;
+  };
+}) {
+  // The plugin's `cinatra-post-update` ability (the ratified MCP surface, #81)
+  // covers title/content/excerpt/status only — NOT `meta`. Rather than silently
+  // drop a requested change, fail closed and route the caller to the dedicated
+  // meta primitive (`wordpress_post_update_meta` stays on its REST carve-out per
+  // the #1214 design §C — meta over MCP would need a plugin ability that #81
+  // does not register).
+  if (input.fields.meta !== undefined) {
+    throw new Error(
+      "wordpress_post_update cannot write post meta over the MCP content server — " +
+        "use wordpress_post_update_meta for meta writes.",
+    );
+  }
+
+  // Build the tool args: strip undefined; drop empty-string content/excerpt
+  // (WordPress applies them literally and would wipe the body). Only literal
+  // "" is dropped so a legitimate title clear still works.
+  const args: Record<string, unknown> = { id: input.postId };
+  if (input.postType !== undefined) args.postType = input.postType;
+  if (typeof input.fields.title === "string") args.title = input.fields.title;
+  if (typeof input.fields.content === "string" && input.fields.content.length > 0) args.content = input.fields.content;
+  if (typeof input.fields.excerpt === "string" && input.fields.excerpt.length > 0) args.excerpt = input.fields.excerpt;
+  if (typeof input.fields.status === "string") args.status = input.fields.status;
+
+  // Guard against dispatching an update with no editable field left after
+  // stripping (the ability rejects it 400 anyway; surface it precisely).
+  const editableKeys = Object.keys(args).filter((k) => k !== "id" && k !== "postType");
+  if (editableKeys.length === 0) {
+    throw new Error("No editable fields to update (title/content/excerpt/status).");
+  }
+
+  const raw = (await callWordPressMcp(input.instance, CINATRA_POST_UPDATE_TOOL, args)) as CinatraPostPayload;
+  const id = Number(raw?.id);
+  const resolvedId = Number.isFinite(id) ? id : input.postId;
+  return {
+    id: resolvedId,
+    status: asString(raw?.status) || "unknown",
+    title: asString(raw?.title),
+    content: asString(raw?.content),
+    excerpt: asString(raw?.excerpt),
+    adminUrl: buildAdminUrl(input.instance.siteUrl, resolvedId),
+  };
+}
 
 export function createWordPressPrimitiveHandlers() {
   return {
@@ -239,7 +367,10 @@ export function createWordPressPrimitiveHandlers() {
       const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
-      return getWordPressDeps().readPost({ instance, wordpressPostId: postId, postType });
+      // MCP-only egress (cinatra#1214 S1): read over the plugin's content MCP
+      // server (cinatra-post-get), never a direct /wp/v2/* fetch. Fail-closed
+      // if the tool is absent (plugin missing/too old).
+      return readPostViaMcp(instance, postId, postType);
     },
 
     "wordpress_post_update_meta": async (request: ExtensionPrimitiveRequest<unknown>) => {
@@ -270,20 +401,27 @@ export function createWordPressPrimitiveHandlers() {
       return getWordPressDeps().updateDraftMeta({ instance, wordpressPostId: postId, meta: safeMeta });
     },
 
-    // Top-level WordPress post update.
-    // Sends title/content/excerpt/status/meta to /wp/v2/posts/{id}. This is
-    // the primitive the wordpress-content-editor SKILL.md uses for the
-    // demote-then-edit pattern (status:draft + edits in one call). The
-    // existing wordpress_post_update_meta is preserved for meta-only writes.
+    // Top-level WordPress post update (title/content/excerpt/status) over the
+    // site's MCP content server (cinatra-post-update), never a direct REST call
+    // (cinatra#1214 S1). This is the primitive the wordpress-content-editor
+    // SKILL.md uses for the demote-then-edit pattern (status:draft + edits in
+    // one call). Meta-only writes stay on the wordpress_post_update_meta
+    // carve-out (the MCP ability does not cover post meta).
     "wordpress_post_update": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const input = postUpdateSchema.parse(request.input);
       const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === input.instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
+      // cinatra#409 — per-user / per-instance write authorization (fail-closed).
+      // Transport-independent: it gates BEFORE any write reaches WordPress.
       await requireWriteAuthority(input.instanceId, "wordpress_post_update");
-      return getWordPressDeps().updatePost({
+      // MCP-only egress (cinatra#1214 S1): update over the plugin's content MCP
+      // server (cinatra-post-update), never a direct /wp/v2/* fetch. The
+      // demote-then-edit gate (status:"draft") is preserved by forwarding the
+      // status field; the plugin applies it and WordPress auto-revisions.
+      return updatePostViaMcp({
         instance,
-        wordpressPostId: input.postId,
+        postId: input.postId,
         postType: input.postType,
         fields: {
           title:   input.title,

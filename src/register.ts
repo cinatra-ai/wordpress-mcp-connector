@@ -56,14 +56,12 @@ type HostWordPressMcpShape = {
 // service so connection admin and content CRUD never evolve under one id.
 type HostWordPressContentShape = {
   createDraft: WordPressConnectorDeps["createDraft"];
-  readPost: WordPressConnectorDeps["readPost"];
   readPostStatus: WordPressConnectorDeps["readPostStatus"];
   listPublishedPosts: WordPressConnectorDeps["listPublishedPosts"];
   listPublishedPages: WordPressConnectorDeps["listPublishedPages"];
   deletePost: WordPressConnectorDeps["deletePost"];
   uploadMedia: WordPressConnectorDeps["uploadMedia"];
   updateDraftMeta: WordPressConnectorDeps["updateDraftMeta"];
-  updatePost: WordPressConnectorDeps["updatePost"];
 };
 // Per-user / per-connector-instance WRITE-authority host service (cinatra#409).
 // The host publishes ONE shared `instance-write-authority` service
@@ -109,7 +107,10 @@ function hostService<T>(ctx: ExtensionHostContext, capability: string): T {
 /** Build the host-bound deps from the per-concern host services. Every member
  * resolves LAZILY at call time — constructing this object does no I/O and no
  * resolution (probe-safe). */
-function buildHostBoundDeps(ctx: ExtensionHostContext): WordPressConnectorDeps {
+function buildHostBoundDeps(
+  ctx: ExtensionHostContext,
+  wordpressClient: WordPressClient,
+): WordPressConnectorDeps {
   const pagination = () => hostService<HostMcpPaginationShape>(ctx, "@cinatra-ai/host:mcp-pagination");
   const contentEditor = () =>
     hostService<HostContentEditorDispatchShape>(ctx, "@cinatra-ai/host:content-editor-dispatch");
@@ -145,18 +146,30 @@ function buildHostBoundDeps(ctx: ExtensionHostContext): WordPressConnectorDeps {
     isPrivateUrl: (url) => wordpressMcp().isPrivateUrl(url),
     // Connection/instance-admin read (cinatra#172 Stage H3).
     getApiStatus: () => wordpressMcp().getAPIStatus(),
+    // cinatra#1214 S1 — in-admin MCP content-client Basic-auth seam. Resolved
+    // from THIS connector's relocated client (`resolveWordPressBasicAuth` →
+    // Nango credential + the #1077 instance-connection use-gate + audit
+    // `source:"wordpress-api"`), so `callWordPressMcp` authenticates the MCP
+    // content server with the SAME credential + use-gate + audit the direct
+    // REST client used — only the transport changes. Bound from the connector's
+    // OWN client (not the wordpress-content capability), which the host's own
+    // publication does not expose a standalone auth resolver on.
+    buildWordPressBasicAuthHeader: async (input) => {
+      const auth = await wordpressClient.resolveWordPressBasicAuth(asWordPressInstanceRow(input.instance));
+      return { Authorization: auth.authHeader };
+    },
     // Post/media content surface (cinatra#172 Stage H3). The WRITERS are only
     // ever reached through the host's MCP dispatch + actor gating (see the
     // host service's TRUST note; posture identical to the static imports).
+    // NOTE: `readPost`/`updatePost` were RETIRED in cinatra#1214 S1 — the
+    // in-admin get/update reroute to `callWordPressMcp` (MCP-only egress).
     createDraft: (input) => wordpressContent().createDraft(input),
-    readPost: (input) => wordpressContent().readPost(input),
     readPostStatus: (input) => wordpressContent().readPostStatus(input),
     listPublishedPosts: (instance, options) => wordpressContent().listPublishedPosts(instance, options),
     listPublishedPages: (instance, options) => wordpressContent().listPublishedPages(instance, options),
     deletePost: (input) => wordpressContent().deletePost(input),
     uploadMedia: (input) => wordpressContent().uploadMedia(input),
     updateDraftMeta: (input) => wordpressContent().updateDraftMeta(input),
-    updatePost: (input) => wordpressContent().updatePost(input),
     // cinatra#409 — per-user write authorization. Binds to the connector's OWN
     // static KIND ("wordpress") — the host maps it to BOTH the package id and the
     // instance reader; the connector forwards only instanceId+primitiveName, and
@@ -281,12 +294,6 @@ function buildWordPressContentProvider(client: WordPressClient) {
   return {
     createDraft: (input: { instance: WordPressContentInstanceInput; payload: Parameters<WordPressClient["createWordPressDraft"]>[0]["payload"] }) =>
       client.createWordPressDraft({ instance: asWordPressInstanceRow(input.instance), payload: input.payload }),
-    readPost: (input: { instance: WordPressContentInstanceInput; wordpressPostId: number; postType?: string }) =>
-      client.readWordPressPost({
-        instance: asWordPressInstanceRow(input.instance),
-        wordpressPostId: input.wordpressPostId,
-        postType: input.postType,
-      }),
     readPostStatus: (input: { instance: WordPressContentInstanceInput; wordpressPostId: number; postType?: string }) =>
       client.readWordPressPostStatus({
         instance: asWordPressInstanceRow(input.instance),
@@ -322,18 +329,6 @@ function buildWordPressContentProvider(client: WordPressClient) {
         instance: asWordPressInstanceRow(input.instance),
         wordpressPostId: input.wordpressPostId,
         meta: input.meta,
-      }),
-    updatePost: (input: {
-      instance: WordPressContentInstanceInput;
-      wordpressPostId: number;
-      postType?: string;
-      fields: Parameters<WordPressClient["updateWordPressPost"]>[0]["fields"];
-    }) =>
-      client.updateWordPressPost({
-        instance: asWordPressInstanceRow(input.instance),
-        wordpressPostId: input.wordpressPostId,
-        postType: input.postType,
-        fields: input.fields,
       }),
   };
 }
@@ -378,7 +373,13 @@ export function register(ctx: ExtensionHostContext): void {
   // meet is post-cutover): re-activation — incl. a hot-update digest swap —
   // re-binds fresh lazy resolvers, so a stale deps object can never outlive
   // its digest.
-  registerWordPressConnector(buildHostBoundDeps(ctx));
+  // cinatra#1214 S1 — build the connector-owned client FIRST: the deps slot's
+  // in-admin MCP content-client auth seam (`buildWordPressBasicAuthHeader`)
+  // resolves from THIS client's `resolveWordPressBasicAuth`. Construction does
+  // NO host-service resolution and NO I/O (probe-safe) — every client member
+  // resolves its host capability lazily at call time.
+  const wordpressClient = createWordPressClient(ctx);
+  registerWordPressConnector(buildHostBoundDeps(ctx, wordpressClient));
 
   // cinatra#975 Wave 2 — register the connector-owned widget-auth store as the
   // `@cinatra-ai/host:wordpress-widget-auth` capability. The publish direction
@@ -399,7 +400,7 @@ export function register(ctx: ExtensionHostContext): void {
   // instance-connection-gate lazily at call time and fails loud when one is
   // unresolved. Until the core-eviction follow-up, the host's own publication
   // keeps serving consumers — these providers coexist keyed by packageName.
-  const wordpressClient = createWordPressClient(ctx);
+  // (`wordpressClient` is built at the top of register() for the S1 auth seam.)
   ctx.capabilities.registerProvider("@cinatra-ai/host:wordpress-content", {
     packageName: PACKAGE_NAME,
     impl: buildWordPressContentProvider(wordpressClient),

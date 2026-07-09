@@ -3,6 +3,13 @@
 All notable changes to this project are documented here, derived from the
 project's merged pull request and release-tag history.
 
+## Unreleased
+
+Requires the Cinatra WordPress plugin's content abilities (cinatra-ai/wordpress-plugin#81) to be installed on the connected site — an older plugin without them makes the in-admin editor fail closed rather than silently falling back to direct REST.
+
+- feat(mcp): the in-admin post read + update reach WordPress ONLY through the site's MCP integration — `wordpress_post_get` / `wordpress_post_update` reroute to the plugin's `cinatra-post-get` / `cinatra-post-update` tools via a new `callWordPressMcp` client (Application-Password Basic over StreamableHTTP, resolved through the same Nango credential + connection use-gate + audit the REST client used). Runtime tool-detection FAILS CLOSED when the plugin/tools are absent — it never falls back to a direct `/wp/v2/*` call. The demote-then-edit gate (`status:"draft"`) and the per-user write-authority gate are preserved. The direct-REST `readWordPressPost` / `updateWordPressPost` helpers are deleted (cinatra#1214 S1).
+- test(guard): unit + static (AST) egress guard — the in-admin handlers invoke the MCP client and make zero direct fetches, and the handler source carries no `/wp/v2/*` direct-REST egress (cinatra#1214 S4, WordPress half).
+
 ## v0.1.6 — 2026-07-07
 
 Required rider alongside Cinatra 0.1.7: this release takes ownership of WordPress-specific capability code that Cinatra 0.1.7 removes from core.

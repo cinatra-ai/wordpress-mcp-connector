@@ -48,15 +48,14 @@ beforeEach(() => {
     // Connection/instance-admin + content surface (cinatra#172 Stage H3 —
     // unused by the toolbox's code paths).
     getApiStatus: () => ({ status: "not_connected" as const, detail: "" }),
+    buildWordPressBasicAuthHeader: vi.fn(async () => ({ Authorization: "Basic test" })),
     createDraft: vi.fn(),
-    readPost: vi.fn(),
     readPostStatus: vi.fn(),
     listPublishedPosts: vi.fn(async () => ({ items: [], total: 0 })),
     listPublishedPages: vi.fn(async () => ({ items: [], total: 0 })),
     deletePost: vi.fn(async () => ({ deleted: true })),
     uploadMedia: vi.fn(),
     updateDraftMeta: vi.fn(),
-    updatePost: vi.fn(),
     // cinatra#409 per-instance `use` authority gate — the external-MCP toolbox
     // now gates EACH instance through this before emitting its credentials.
     // Default stub allows; tests override to deny.

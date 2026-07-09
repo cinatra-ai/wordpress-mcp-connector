@@ -25,6 +25,16 @@ import {
   type WordPressMcpInstance,
 } from "../deps";
 
+// wordpress_post_update / wordpress_post_get reroute to the MCP client
+// (cinatra#1214 S1); mock it so this suite asserts the gate-before-write
+// ordering against the MCP writer, not a live transport.
+vi.mock("../lib/wordpress-mcp-client", () => ({
+  callWordPressMcp: vi.fn(),
+  CINATRA_POST_GET_TOOL: "cinatra-post-get",
+  CINATRA_POST_UPDATE_TOOL: "cinatra-post-update",
+}));
+import { callWordPressMcp } from "../lib/wordpress-mcp-client";
+
 // The host write-authority gate. Default = ALLOW; individual tests override it
 // to DENY (reject) to model non-member / member-without-right / null-actor /
 // cross-org / suppressed-platform-admin decisions.
@@ -35,9 +45,8 @@ const requireInstanceWriteAuthorityMock = vi.fn(
 // The five host writers behind the gated primitives. We assert these fire ONLY
 // after an allow, and NEVER after a deny / unbound gate.
 const createDraftMock = vi.fn(async () => ({ wordpressPostId: 10, adminUrl: "a" }));
-const updatePostMock = vi.fn(async () => ({
-  id: 10, status: "draft", title: "T", content: "C", excerpt: "E", adminUrl: "a",
-}));
+// wordpress_post_update's "writer" is now the MCP client (callWordPressMcp),
+// mocked above — see WRITER_FOR / allWriterMocks below.
 const updateDraftMetaMock = vi.fn(async () => ({ id: 10 }));
 const deletePostMock = vi.fn(async () => ({ deleted: true }));
 const uploadMediaMock = vi.fn(async () => ({ mediaId: 7 }));
@@ -76,16 +85,13 @@ function registerDepsStub(over?: {
     resolveMcpServerUrl: (siteUrl: string) => siteUrl,
     isPrivateUrl: () => false,
     getApiStatus: () => ({ status: "not_connected" as const, detail: "" }),
+    buildWordPressBasicAuthHeader: vi.fn(async () => ({ Authorization: "Basic test" })),
     createDraft: createDraftMock,
-    readPost: vi.fn(async () => ({
-      id: 10, status: "draft", title: "T", content: "C", excerpt: "E", adminUrl: "a",
-    })),
     readPostStatus: vi.fn(async () => ({ id: 10, status: "draft", adminUrl: "a" })),
     listPublishedPosts: vi.fn(async () => ({ items: [], total: 0 })),
     deletePost: deletePostMock,
     uploadMedia: uploadMediaMock,
     updateDraftMeta: updateDraftMetaMock,
-    updatePost: updatePostMock,
     requireInstanceWriteAuthority: requireInstanceWriteAuthorityMock,
   };
   if (over?.omitGate) {
@@ -100,14 +106,14 @@ function registerDepsStub(over?: {
 // Returns the host writer mock that a given primitive ultimately dispatches to.
 const WRITER_FOR: Record<string, () => ReturnType<typeof vi.fn>> = {
   wordpress_post_create_draft: () => createDraftMock,
-  wordpress_post_update: () => updatePostMock,
+  wordpress_post_update: () => vi.mocked(callWordPressMcp),
   wordpress_post_update_meta: () => updateDraftMetaMock,
   wordpress_post_delete: () => deletePostMock,
   wordpress_media_upload: () => uploadMediaMock,
 };
 
 function allWriterMocks() {
-  return [createDraftMock, updatePostMock, updateDraftMetaMock, deletePostMock, uploadMediaMock];
+  return [createDraftMock, vi.mocked(callWordPressMcp), updateDraftMetaMock, deletePostMock, uploadMediaMock];
 }
 
 describe("cinatra#409 — per-user write authorization in the WordPress MCP write handlers", () => {
@@ -120,6 +126,10 @@ describe("cinatra#409 — per-user write authorization in the WordPress MCP writ
     requireInstanceWriteAuthorityMock.mockReset();
     requireInstanceWriteAuthorityMock.mockResolvedValue(undefined);
     for (const m of allWriterMocks()) m.mockClear();
+    // The MCP writer (wordpress_post_update) + reader (wordpress_post_get) resolve
+    // a default post payload; individual tests override for ordering/deny cases.
+    vi.mocked(callWordPressMcp).mockReset();
+    vi.mocked(callWordPressMcp).mockResolvedValue({ id: 10, status: "draft", title: "T", content: "C", excerpt: "E" });
     registerDepsStub();
   });
 
@@ -215,9 +225,9 @@ describe("cinatra#409 — per-user write authorization in the WordPress MCP writ
       order.push("authz");
       throw new Error("write denied: ordering");
     });
-    updatePostMock.mockImplementationOnce(async () => {
+    vi.mocked(callWordPressMcp).mockImplementationOnce(async () => {
       order.push("write");
-      return { id: 5, status: "draft", title: "", content: "", excerpt: "", adminUrl: "a" };
+      return { id: 5, status: "draft", title: "", content: "", excerpt: "" };
     });
     await expect(
       (handlers as any).wordpress_post_update({
@@ -242,7 +252,7 @@ describe("cinatra#409 — per-user write authorization in the WordPress MCP writ
         mode: "agentic",
       }),
     ).rejects.toThrow(/write-authority gate is unavailable|unbound|denied/i);
-    expect(updatePostMock).not.toHaveBeenCalled();
+    expect(callWordPressMcp).not.toHaveBeenCalled();
   });
 
   it("FAILS CLOSED when the bound gate is not a function (skewed/partial host binding)", async () => {
