@@ -287,10 +287,11 @@ function buildWordPressContentProvider(client: WordPressClient) {
         wordpressPostId: input.wordpressPostId,
         postType: input.postType,
       }),
-    readPostStatus: (input: { instance: WordPressContentInstanceInput; wordpressPostId: number }) =>
+    readPostStatus: (input: { instance: WordPressContentInstanceInput; wordpressPostId: number; postType?: string }) =>
       client.readWordPressPostStatus({
         instance: asWordPressInstanceRow(input.instance),
         wordpressPostId: input.wordpressPostId,
+        postType: input.postType,
       }),
     listPublishedPosts: (
       instance: WordPressContentInstanceInput,
@@ -300,10 +301,11 @@ function buildWordPressContentProvider(client: WordPressClient) {
       instance: WordPressContentInstanceInput,
       options?: { offset?: number; limit?: number },
     ) => client.listPublishedWordPressPages(asWordPressInstanceRow(instance), options),
-    deletePost: (input: { instance: WordPressContentInstanceInput; wordpressPostId: number }) =>
+    deletePost: (input: { instance: WordPressContentInstanceInput; wordpressPostId: number; postType?: string }) =>
       client.deleteWordPressPost({
         instance: asWordPressInstanceRow(input.instance),
         wordpressPostId: input.wordpressPostId,
+        postType: input.postType,
       }),
     uploadMedia: (input: {
       instance: WordPressContentInstanceInput;

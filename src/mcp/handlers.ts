@@ -88,7 +88,7 @@ export const createDraftSchema = z.object({
 export const postStatusSchema = z.object({
   instanceId: z.string().min(1),
   postId: z.number().int(),
-  postType: z.string().optional(),
+  postType: z.string().optional().describe("Post type slug — pass 'page' to target a WordPress page (routes to /wp/v2/pages/{id} instead of /posts/{id})."),
 });
 
 export const uploadMediaSchema = z.object({
@@ -169,7 +169,8 @@ export function createWordPressPrimitiveHandlers() {
       const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === input.instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
-      return getWordPressDeps().readPostStatus({ instance, wordpressPostId: input.postId });
+      // postType: "page" routes the status read to /wp/v2/pages/{id}.
+      return getWordPressDeps().readPostStatus({ instance, wordpressPostId: input.postId, postType: input.postType });
     },
 
     "wordpress_post_delete": async (request: ExtensionPrimitiveRequest<unknown>) => {
@@ -178,7 +179,8 @@ export function createWordPressPrimitiveHandlers() {
       const instance = instances.find((i) => i.id === input.instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
       await requireWriteAuthority(input.instanceId, "wordpress_post_delete");
-      await getWordPressDeps().deletePost({ instance, wordpressPostId: input.postId });
+      // postType: "page" routes the delete to /wp/v2/pages/{id}.
+      await getWordPressDeps().deletePost({ instance, wordpressPostId: input.postId, postType: input.postType });
       return { ok: true };
     },
 

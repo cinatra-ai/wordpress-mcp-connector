@@ -548,3 +548,75 @@ describe("wordpress_pages_list — routes to listPublishedPages + paginates", ()
     ).rejects.toThrow(/instance not found/i);
   });
 });
+
+// ---------------------------------------------------------------------------
+// wordpress_post_status / wordpress_post_delete — page-aware: the optional
+// postType must be threaded through to the host deps (postType:"page" routes
+// the read/delete to /wp/v2/pages/{id}); posts keep their prior behavior.
+// ---------------------------------------------------------------------------
+describe("wordpress_post_status / wordpress_post_delete — thread postType", () => {
+  const SITE = {
+    id: "site-1",
+    siteUrl: "https://example.com",
+    username: "u",
+    applicationPassword: "p",
+    name: "Site 1",
+    createdAt: "",
+    updatedAt: "",
+  };
+
+  beforeEach(() => {
+    _resetWordPressDepsForTests();
+  });
+
+  it("wordpress_post_status forwards postType:'page' to readPostStatus", async () => {
+    const readPostStatus = vi.fn(async () => ({ id: 81, status: "publish", adminUrl: "a" }));
+    registerStubDeps({ listMcpInstances: () => [SITE], readPostStatus });
+    const handlers = createWordPressPrimitiveHandlers();
+    await (handlers as any).wordpress_post_status({
+      primitiveName: "wordpress_post_status",
+      input: { instanceId: "site-1", postId: 81, postType: "page" },
+      actor: { actorType: "model", source: "agent" },
+      mode: "agentic",
+    });
+    expect(readPostStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ wordpressPostId: 81, postType: "page" }),
+    );
+  });
+
+  it("wordpress_post_status leaves postType undefined for posts", async () => {
+    const readPostStatus = vi.fn(async () => ({ id: 82, status: "draft", adminUrl: "a" }));
+    registerStubDeps({ listMcpInstances: () => [SITE], readPostStatus });
+    const handlers = createWordPressPrimitiveHandlers();
+    await (handlers as any).wordpress_post_status({
+      primitiveName: "wordpress_post_status",
+      input: { instanceId: "site-1", postId: 82 },
+      actor: { actorType: "model", source: "agent" },
+      mode: "agentic",
+    });
+    expect(readPostStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ wordpressPostId: 82, postType: undefined }),
+    );
+  });
+
+  it("wordpress_post_delete forwards postType:'page' to deletePost (after write authority)", async () => {
+    const deletePost = vi.fn(async () => ({ deleted: true }));
+    const requireInstanceWriteAuthority = vi.fn(async () => {});
+    registerStubDeps({ listMcpInstances: () => [SITE], deletePost, requireInstanceWriteAuthority });
+    const handlers = createWordPressPrimitiveHandlers();
+    const res = await (handlers as any).wordpress_post_delete({
+      primitiveName: "wordpress_post_delete",
+      input: { instanceId: "site-1", postId: 81, postType: "page" },
+      actor: { actorType: "model", source: "agent" },
+      mode: "agentic",
+    });
+    expect(requireInstanceWriteAuthority).toHaveBeenCalledWith({
+      instanceId: "site-1",
+      primitiveName: "wordpress_post_delete",
+    });
+    expect(deletePost).toHaveBeenCalledWith(
+      expect.objectContaining({ wordpressPostId: 81, postType: "page" }),
+    );
+    expect(res).toEqual({ ok: true });
+  });
+});

@@ -25,11 +25,13 @@ const TOOL_META: Record<string, { description: string; inputSchema: z.ZodTypeAny
     inputSchema: createDraftSchema,
   },
   "wordpress_post_status": {
-    description: "Get the current status of a WordPress post by its ID.",
+    description:
+      "Get the current status of a WordPress post by its ID. For a WordPress page, pass postType: \"page\" (required — it routes to /wp/v2/pages/{id}); otherwise the id is read from the posts collection.",
     inputSchema: postStatusSchema,
   },
   "wordpress_post_delete": {
-    description: "Delete a WordPress post by its ID.",
+    description:
+      "Delete a WordPress post by its ID. For a WordPress page, pass postType: \"page\" (required — it routes to /wp/v2/pages/{id}); otherwise the id is deleted from the posts collection.",
     inputSchema: postStatusSchema,
   },
   "wordpress_media_upload": {
@@ -43,7 +45,7 @@ const TOOL_META: Record<string, { description: string; inputSchema: z.ZodTypeAny
   },
   "wordpress_pages_list": {
     description:
-      "List recently published pages from a WordPress instance (the /wp/v2/pages collection), ordered newest first. Returns metadata-only items (id, title, status, date, url) — no rendered HTML body or excerpt. Use this to discover a page id, then read or update it with wordpress_post_get / wordpress_post_update passing postType: \"page\". If nextCursor is present, call again with cursor=<nextCursor> to retrieve the next page.",
+      "List recently published pages from a WordPress instance (the /wp/v2/pages collection), ordered newest first. Returns metadata-only items (id, title, status, date, url) — no rendered HTML body or excerpt. Use this to discover a page id, then read, update, check the status of, or delete it with wordpress_post_get / wordpress_post_update / wordpress_post_status / wordpress_post_delete passing postType: \"page\". If nextCursor is present, call again with cursor=<nextCursor> to retrieve the next page.",
     inputSchema: postsListSchema,
   },
   "wordpress_post_get_latest": {
