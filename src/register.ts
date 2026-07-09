@@ -59,6 +59,7 @@ type HostWordPressContentShape = {
   readPost: WordPressConnectorDeps["readPost"];
   readPostStatus: WordPressConnectorDeps["readPostStatus"];
   listPublishedPosts: WordPressConnectorDeps["listPublishedPosts"];
+  listPublishedPages: WordPressConnectorDeps["listPublishedPages"];
   deletePost: WordPressConnectorDeps["deletePost"];
   uploadMedia: WordPressConnectorDeps["uploadMedia"];
   updateDraftMeta: WordPressConnectorDeps["updateDraftMeta"];
@@ -151,6 +152,7 @@ function buildHostBoundDeps(ctx: ExtensionHostContext): WordPressConnectorDeps {
     readPost: (input) => wordpressContent().readPost(input),
     readPostStatus: (input) => wordpressContent().readPostStatus(input),
     listPublishedPosts: (instance, options) => wordpressContent().listPublishedPosts(instance, options),
+    listPublishedPages: (instance, options) => wordpressContent().listPublishedPages(instance, options),
     deletePost: (input) => wordpressContent().deletePost(input),
     uploadMedia: (input) => wordpressContent().uploadMedia(input),
     updateDraftMeta: (input) => wordpressContent().updateDraftMeta(input),
@@ -294,6 +296,10 @@ function buildWordPressContentProvider(client: WordPressClient) {
       instance: WordPressContentInstanceInput,
       options?: { offset?: number; limit?: number },
     ) => client.listPublishedWordPressPosts(asWordPressInstanceRow(instance), options),
+    listPublishedPages: (
+      instance: WordPressContentInstanceInput,
+      options?: { offset?: number; limit?: number },
+    ) => client.listPublishedWordPressPages(asWordPressInstanceRow(instance), options),
     deletePost: (input: { instance: WordPressContentInstanceInput; wordpressPostId: number }) =>
       client.deleteWordPressPost({
         instance: asWordPressInstanceRow(input.instance),

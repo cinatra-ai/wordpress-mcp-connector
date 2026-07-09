@@ -296,6 +296,10 @@ export type WordPressClient = {
     instance: WordPressInstanceSettings,
     options?: { offset?: number; limit?: number },
   ): Promise<{ items: WordPressPostListItem[]; total: number }>;
+  listPublishedWordPressPages(
+    instance: WordPressInstanceSettings,
+    options?: { offset?: number; limit?: number },
+  ): Promise<{ items: WordPressPostListItem[]; total: number }>;
   createWordPressDraft(input: {
     instance: WordPressInstanceSettings;
     payload: WordPressWritablePostPayload;
@@ -1134,12 +1138,23 @@ export function createWordPressClient(ctx: ExtensionHostContext): WordPressClien
   }
 
   // ---------------------------------------------------------------------------
-  // List published posts — metadata-only, cursor-paginated
+  // List published posts / pages — metadata-only, cursor-paginated
   // ---------------------------------------------------------------------------
 
-  async function listPublishedWordPressPosts(
+  /**
+   * Shared metadata-only, offset-paginated published-content lister. Posts and
+   * pages differ ONLY by the REST collection route (`/posts` vs `/pages`) and
+   * the capture label — the query params, the `x-wp-total` pagination read, and
+   * the `{ id, title, status, date, url }` projection are identical. The
+   * `listPublishedWordPressPosts` / `listPublishedWordPressPages` members are
+   * thin wrappers so each stays a distinct, self-describing client method (and
+   * the pages primitive routes to `/wp/v2/pages`, mirroring the read/update
+   * post-type routing).
+   */
+  async function listPublishedWordPressContent(
     instance: WordPressInstanceSettings,
-    options: { offset?: number; limit?: number } = {},
+    options: { offset?: number; limit?: number },
+    collection: { route: "/posts" | "/pages"; label: string; noun: string },
   ): Promise<{ items: WordPressPostListItem[]; total: number }> {
     const auth = await resolveWordPressBasicAuth(instance);
     const limit = Math.max(1, Math.min(100, options.limit ?? 10));
@@ -1154,10 +1169,10 @@ export function createWordPressClient(ctx: ExtensionHostContext): WordPressClien
       _fields: "id,title,status,date,link",
     });
     await writeWordPressLogFile({
-      label: "wordpress-posts-list",
+      label: collection.label,
       kind: "request",
       body: {
-        endpoint: buildRESTEndpoint(instance.siteUrl, "/posts", params),
+        endpoint: buildRESTEndpoint(instance.siteUrl, collection.route, params),
         method: "GET",
         siteUrl: instance.siteUrl,
         username: auth.username,
@@ -1165,7 +1180,7 @@ export function createWordPressClient(ctx: ExtensionHostContext): WordPressClien
         limit,
       },
     });
-    const response = await fetchWithTimeout(buildRESTEndpoint(instance.siteUrl, "/posts", params), {
+    const response = await fetchWithTimeout(buildRESTEndpoint(instance.siteUrl, collection.route, params), {
       method: "GET",
       headers: {
         Authorization: auth.authHeader,
@@ -1178,14 +1193,14 @@ export function createWordPressClient(ctx: ExtensionHostContext): WordPressClien
     const totalHeader = response.headers.get("x-wp-total");
     const total = totalHeader ? parseInt(totalHeader, 10) : 0;
     await writeWordPressLogFile({
-      label: "wordpress-posts-list",
+      label: collection.label,
       kind: "response",
       body: { status: response.status, total, count: Array.isArray(payload) ? payload.length : 0 },
     });
     if (!response.ok) {
       const message = !Array.isArray(payload) && payload?.message
         ? payload.message
-        : "Unable to list WordPress posts.";
+        : `Unable to list WordPress ${collection.noun}.`;
       throw new Error(message);
     }
 
@@ -1198,6 +1213,28 @@ export function createWordPressClient(ctx: ExtensionHostContext): WordPressClien
       url: typeof post.link === "string" ? post.link : "",
     }));
     return { items, total: Number.isFinite(total) ? total : items.length };
+  }
+
+  async function listPublishedWordPressPosts(
+    instance: WordPressInstanceSettings,
+    options: { offset?: number; limit?: number } = {},
+  ): Promise<{ items: WordPressPostListItem[]; total: number }> {
+    return listPublishedWordPressContent(instance, options, {
+      route: "/posts",
+      label: "wordpress-posts-list",
+      noun: "posts",
+    });
+  }
+
+  async function listPublishedWordPressPages(
+    instance: WordPressInstanceSettings,
+    options: { offset?: number; limit?: number } = {},
+  ): Promise<{ items: WordPressPostListItem[]; total: number }> {
+    return listPublishedWordPressContent(instance, options, {
+      route: "/pages",
+      label: "wordpress-pages-list",
+      noun: "pages",
+    });
   }
 
   function buildWritableWordPressPostPayload(post?: WordPressPostRecord | null): WordPressWritablePostPayload {
@@ -1836,6 +1873,7 @@ export function createWordPressClient(ctx: ExtensionHostContext): WordPressClien
     listWordPressInstances,
     readLatestPublishedWordPressPost,
     listPublishedWordPressPosts,
+    listPublishedWordPressPages,
     createWordPressDraft,
     readWordPressPostStatus,
     deleteWordPressPost,

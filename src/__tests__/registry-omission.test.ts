@@ -22,6 +22,7 @@ describe("registerWordPressPrimitives — relay is NOT a model-visible MCP tool 
     // Real CMS primitives the SKILL.md names are present...
     expect(registered).toContain("wordpress_post_get");
     expect(registered).toContain("wordpress_post_update");
+    expect(registered).toContain("wordpress_pages_list");
     // ...but the dispatcher relay is excluded from the MCP surface.
     expect(registered).not.toContain("wordpress_content_editor_run");
   });

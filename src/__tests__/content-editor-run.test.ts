@@ -36,6 +36,7 @@ function registerStubDeps() {
     readPost: vi.fn(),
     readPostStatus: vi.fn(),
     listPublishedPosts: vi.fn(async () => ({ items: [], total: 0 })),
+    listPublishedPages: vi.fn(async () => ({ items: [], total: 0 })),
     deletePost: vi.fn(async () => ({ deleted: true })),
     uploadMedia: vi.fn(),
     updateDraftMeta: vi.fn(),

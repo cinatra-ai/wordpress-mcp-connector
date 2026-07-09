@@ -202,6 +202,22 @@ export function createWordPressPrimitiveHandlers() {
       return getWordPressDeps().buildListPage(items, total, offset, limit);
     },
 
+    // Page discovery. Mirrors wordpress_posts_list exactly (same cursor
+    // pagination + metadata-only projection) but routes to /wp/v2/pages via the
+    // host-bound listPublishedPages dep. Lets an external MCP caller find a
+    // WordPress page, then read or update it with wordpress_post_get /
+    // wordpress_post_update passing postType: "page".
+    "wordpress_pages_list": async (request: ExtensionPrimitiveRequest<unknown>) => {
+      const { instanceId, cursor } = postsListSchema.parse(request.input);
+      const instances = listInstancesSorted();
+      const instance = instances.find((i) => i.id === instanceId);
+      if (!instance) throw new Error("WordPress instance not found.");
+      const offset = getWordPressDeps().decodeCursor(cursor);
+      const limit = 10;
+      const { items, total } = await getWordPressDeps().listPublishedPages(instance, { offset, limit });
+      return getWordPressDeps().buildListPage(items, total, offset, limit);
+    },
+
     // RENAME-02: forwarding alias — kept so in-flight LLM sessions and
     // stored compiled plans that reference the old name continue to work.
     // Routes to the IDENTICAL handler logic as wordpress_posts_list.

@@ -215,6 +215,14 @@ export interface WordPressConnectorDeps {
     items: Array<{ id: number; title: string; status: string; date: string; url: string }>;
     total: number;
   }>;
+  /** List published pages (metadata-only, offset-paginated; routes to /pages). */
+  listPublishedPages: (
+    instance: WordPressMcpInstance,
+    options?: { offset?: number; limit?: number },
+  ) => Promise<{
+    items: Array<{ id: number; title: string; status: string; date: string; url: string }>;
+    total: number;
+  }>;
   /** WRITER — delete a post on the instance. */
   deletePost: (input: {
     instance: WordPressMcpInstance;
