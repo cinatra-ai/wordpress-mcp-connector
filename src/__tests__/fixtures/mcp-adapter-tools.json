@@ -1,0 +1,19 @@
+{
+  "note": "Recorded tool surface of the external WordPress/mcp-adapter default MCP server, captured from a live WordPress running mcp-adapter 0.4.1 + its abilities-api 0.4.0 dependency (the versions the connector dev fixture provisions). Regenerate with scripts/probe-mcp-adapter.mjs against a site with an Application Password; this file is the exact probe output plus this note. It records WHY the connector injects the adapter with allowedTools:null + requireApproval:read-only and why external page workflows use the Cinatra primitives (postType:\"page\"): the adapter exposes only a generic ability gateway, no first-class page/post tools.",
+  "endpoint": "/wp-json/mcp/mcp-adapter-default-server",
+  "endpointQueryStringForm": "/index.php?rest_route=/mcp/mcp-adapter-default-server",
+  "protocolVersion": "2025-06-18",
+  "serverName": "MCP Adapter Default Server",
+  "tools": [
+    "mcp-adapter-discover-abilities",
+    "mcp-adapter-get-ability-info",
+    "mcp-adapter-execute-ability"
+  ],
+  "discoverAbilities": [],
+  "abilitiesRegistry": [
+    "core/get-site-info",
+    "core/get-environment-info"
+  ],
+  "pageTools": [],
+  "postTools": []
+}
