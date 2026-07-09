@@ -287,6 +287,77 @@ describe("Nango-authed content path — use-gate + credential resolution + captu
   });
 });
 
+describe("listPublishedWordPressPages / Posts — collection routing + metadata projection", () => {
+  function buildClient() {
+    const config = buildConfigStore({ wordpress: { instances: [INSTANCE] } });
+    const { ctx, capture } = buildCtx({
+      "@cinatra-ai/host:connector-config": config.impl,
+      "nango-system": buildNango(),
+      "@cinatra-ai/host:instance-connection-gate": buildGate(),
+    });
+    return { client: createWordPressClient(ctx), capture };
+  }
+
+  const PAGE_ROW = {
+    id: 81,
+    title: { rendered: "Cinatra UAT Page" },
+    status: "publish",
+    date: "2026-01-02T03:04:05",
+    link: "https://site.example/uat-page",
+  };
+
+  it("listPublishedWordPressPages routes to /wp/v2/pages and projects metadata-only items", async () => {
+    const { client, capture } = buildClient();
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse([PAGE_ROW], { headers: { "x-wp-total": "3" } }),
+    );
+
+    const result = await client.listPublishedWordPressPages(INSTANCE, { offset: 0, limit: 10 });
+
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+    // ROUTE PROOF: the request hits the /wp/v2/pages collection, never /posts.
+    expect(url).toContain("rest_route=%2Fwp%2Fv2%2Fpages");
+    expect(url).not.toContain("%2Fwp%2Fv2%2Fposts");
+    expect(url).toContain("status=publish");
+    expect(url).toContain("_fields=id%2Ctitle%2Cstatus%2Cdate%2Clink");
+    expect(result).toEqual({
+      items: [
+        {
+          id: 81,
+          title: "Cinatra UAT Page",
+          status: "publish",
+          date: "2026-01-02T03:04:05",
+          url: "https://site.example/uat-page",
+        },
+      ],
+      total: 3,
+    });
+    // Distinct capture label so page listings are separable in the logs.
+    expect(capture).toHaveBeenCalledWith(
+      WORDPRESS_API_CAPTURE_CHANNEL,
+      expect.objectContaining({ label: "wordpress-pages-list", kind: "request" }),
+    );
+  });
+
+  it("listPublishedWordPressPosts still routes to /wp/v2/posts (parity guard)", async () => {
+    const { client } = buildClient();
+    fetchMock.mockResolvedValueOnce(jsonResponse([], { headers: { "x-wp-total": "0" } }));
+    await client.listPublishedWordPressPosts(INSTANCE);
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("rest_route=%2Fwp%2Fv2%2Fposts");
+    expect(url).not.toContain("%2Fwp%2Fv2%2Fpages");
+  });
+
+  it("clamps limit to the 1..100 window and threads the offset (shared pagination)", async () => {
+    const { client } = buildClient();
+    fetchMock.mockResolvedValueOnce(jsonResponse([], { headers: { "x-wp-total": "0" } }));
+    await client.listPublishedWordPressPages(INSTANCE, { offset: 20, limit: 999 });
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("per_page=100");
+    expect(url).toContain("offset=20");
+  });
+});
+
 describe("saveWordPressInstanceFromNangoConnection — the UNGATED materializer path", () => {
   it("never calls the use-gate (route machinery owns authorization) and preserves existing bindings", async () => {
     const existing = { ...INSTANCE, blogConnectorId: "site-connector-a" };

@@ -10,6 +10,7 @@
     "wordpress_post_status",
     "wordpress_post_get",
     "wordpress_posts_list",
+    "wordpress_pages_list",
     "wordpress_post_get_latest",
     "wordpress_post_update",
     "wordpress_post_update_meta",

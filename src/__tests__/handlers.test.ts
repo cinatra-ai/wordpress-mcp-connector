@@ -61,6 +61,7 @@ function registerStubDeps(extra: Partial<WordPressConnectorDeps> = {}) {
     readPost: vi.fn(),
     readPostStatus: vi.fn(),
     listPublishedPosts: vi.fn(async () => ({ items: [], total: 0 })),
+    listPublishedPages: vi.fn(async () => ({ items: [], total: 0 })),
     deletePost: vi.fn(async () => ({ deleted: true })),
     uploadMedia: vi.fn(),
     updateDraftMeta: updateDraftMetaMock,
@@ -462,5 +463,88 @@ describe("wordpress_post_update_meta empty-field guard", () => {
     ).rejects.toThrow(/all submitted meta values were empty/i);
 
     expect(updateDraftMetaMock).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// wordpress_pages_list — page discovery routes to the pages content dep
+// (/wp/v2/pages), NOT the posts dep, and paginates like wordpress_posts_list.
+// ---------------------------------------------------------------------------
+describe("wordpress_pages_list — routes to listPublishedPages + paginates", () => {
+  const SITE = {
+    id: "site-1",
+    siteUrl: "https://example.com",
+    username: "u",
+    applicationPassword: "p",
+    name: "Site 1",
+    createdAt: "",
+    updatedAt: "",
+  };
+
+  beforeEach(() => {
+    _resetWordPressDepsForTests();
+  });
+
+  it("calls listPublishedPages (never listPublishedPosts) and returns a paginated page", async () => {
+    const listPublishedPages = vi.fn(async () => ({
+      items: [
+        { id: 81, title: "Cinatra UAT Page", status: "publish", date: "2026-01-02T03:04:05", url: "https://example.com/uat-page" },
+      ],
+      total: 15,
+    }));
+    const listPublishedPosts = vi.fn(async () => ({ items: [], total: 0 }));
+    registerStubDeps({ listMcpInstances: () => [SITE], listPublishedPages, listPublishedPosts });
+    const handlers = createWordPressPrimitiveHandlers();
+
+    const result = await (handlers as any).wordpress_pages_list({
+      primitiveName: "wordpress_pages_list",
+      input: { instanceId: "site-1" },
+      actor: { actorType: "model", source: "agent" },
+      mode: "agentic",
+    });
+
+    expect(listPublishedPages).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "site-1" }),
+      { offset: 0, limit: 10 },
+    );
+    expect(listPublishedPosts).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      items: [
+        { id: 81, title: "Cinatra UAT Page", status: "publish", date: "2026-01-02T03:04:05", url: "https://example.com/uat-page" },
+      ],
+      total: 15,
+      nextCursor: "10",
+    });
+  });
+
+  it("threads the decoded cursor as the next-page offset", async () => {
+    const listPublishedPages = vi.fn(async () => ({ items: [], total: 25 }));
+    registerStubDeps({ listMcpInstances: () => [SITE], listPublishedPages });
+    const handlers = createWordPressPrimitiveHandlers();
+
+    await (handlers as any).wordpress_pages_list({
+      primitiveName: "wordpress_pages_list",
+      input: { instanceId: "site-1", cursor: "10" },
+      actor: { actorType: "model", source: "agent" },
+      mode: "agentic",
+    });
+
+    expect(listPublishedPages).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "site-1" }),
+      { offset: 10, limit: 10 },
+    );
+  });
+
+  it("throws when the instance is not found", async () => {
+    registerStubDeps({ listMcpInstances: () => [SITE] });
+    const handlers = createWordPressPrimitiveHandlers();
+    await expect(
+      (handlers as any).wordpress_pages_list({
+        primitiveName: "wordpress_pages_list",
+        input: { instanceId: "nope" },
+        actor: { actorType: "model", source: "agent" },
+        mode: "agentic",
+      }),
+    ).rejects.toThrow(/instance not found/i);
   });
 });

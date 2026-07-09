@@ -74,6 +74,7 @@ describe("register(ctx) — transport-DI deps binding (Stage 3)", () => {
     }));
     const readPostStatus = vi.fn(async () => ({ id: 10, status: "draft", adminUrl: "a" }));
     const listPublishedPosts = vi.fn(async () => ({ items: [], total: 0 }));
+    const listPublishedPages = vi.fn(async () => ({ items: [], total: 0 }));
     const deletePost = vi.fn(async () => ({ deleted: true }));
     const uploadMedia = vi.fn(async () => ({ mediaId: 7 }));
     const updateDraftMeta = vi.fn(async () => ({ id: 10 }));
@@ -94,6 +95,7 @@ describe("register(ctx) — transport-DI deps binding (Stage 3)", () => {
         readPost,
         readPostStatus,
         listPublishedPosts,
+        listPublishedPages,
         deletePost,
         uploadMedia,
         updateDraftMeta,
@@ -128,6 +130,11 @@ describe("register(ctx) — transport-DI deps binding (Stage 3)", () => {
       getWordPressDeps().listPublishedPosts(instance, { offset: 0, limit: 10 }),
     ).resolves.toEqual({ items: [], total: 0 });
     expect(listPublishedPosts).toHaveBeenCalledWith(instance, { offset: 0, limit: 10 });
+
+    await expect(
+      getWordPressDeps().listPublishedPages(instance, { offset: 0, limit: 10 }),
+    ).resolves.toEqual({ items: [], total: 0 });
+    expect(listPublishedPages).toHaveBeenCalledWith(instance, { offset: 0, limit: 10 });
 
     await expect(getWordPressDeps().deletePost({ instance, wordpressPostId: 10 })).resolves.toEqual({
       deleted: true,
@@ -267,7 +274,7 @@ describe("register(ctx) — relocated WordPress client provider-flip (cinatra#97
     // The FULL existing HostWordPressContentService member set.
     for (const member of [
       "createDraft", "readPost", "readPostStatus", "listPublishedPosts",
-      "deletePost", "uploadMedia", "updateDraftMeta", "updatePost",
+      "listPublishedPages", "deletePost", "uploadMedia", "updateDraftMeta", "updatePost",
     ]) {
       expect(typeof content[member], `wordpress-content.${member}`).toBe("function");
     }
