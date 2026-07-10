@@ -163,6 +163,17 @@ function buildHostBoundDeps(
     // host service's TRUST note; posture identical to the static imports).
     // NOTE: `readPost`/`updatePost` were RETIRED in cinatra#1214 S1 — the
     // in-admin get/update reroute to `callWordPressMcp` (MCP-only egress).
+    //
+    // wordpress-plugin#82 — the IN-ADMIN primitive handlers for status / list /
+    // delete / media / draft / meta now reach WordPress ONLY through the plugin's
+    // content MCP server (`callWordPressMcp`), never these direct-REST content
+    // members. This content seam (and the connector-owned REST client that backs
+    // the published `@cinatra-ai/host:wordpress-content` provider registered
+    // below) is DELIBERATELY RETAINED, not orphaned: the NON-in-admin
+    // blog-publish pipeline and other host consumers still reach the content
+    // capability here — the explicit carve-out the boundary decision permits. Only
+    // the in-admin egress moved behind MCP; the direct-REST client stays because a
+    // non-in-admin caller remains.
     createDraft: (input) => wordpressContent().createDraft(input),
     readPostStatus: (input) => wordpressContent().readPostStatus(input),
     listPublishedPosts: (instance, options) => wordpressContent().listPublishedPosts(instance, options),

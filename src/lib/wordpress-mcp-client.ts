@@ -42,6 +42,14 @@ const CINATRA_CONTENT_MCP_ROUTE = "/index.php?rest_route=/mcp/cinatra-content-se
  * underscores), so `cinatra/post-get` → `cinatra-post-get`. */
 export const CINATRA_POST_GET_TOOL = "cinatra-post-get";
 export const CINATRA_POST_UPDATE_TOOL = "cinatra-post-update";
+// wordpress-plugin#82 — the remaining in-admin content primitives, rehomed onto
+// plugin MCP abilities. Same "namespace/name" → "namespace-name" derivation.
+export const CINATRA_POST_STATUS_TOOL = "cinatra-post-status";
+export const CINATRA_POSTS_LIST_TOOL = "cinatra-posts-list";
+export const CINATRA_POST_DELETE_TOOL = "cinatra-post-delete";
+export const CINATRA_MEDIA_UPLOAD_TOOL = "cinatra-media-upload";
+export const CINATRA_POST_CREATE_DRAFT_TOOL = "cinatra-post-create-draft";
+export const CINATRA_POST_UPDATE_META_TOOL = "cinatra-post-update-meta";
 
 /** Build the dedicated Cinatra content MCP server URL for an instance. */
 function resolveCinatraContentServerUrl(siteUrl: string): string {

@@ -14,6 +14,13 @@ vi.mock("../lib/wordpress-mcp-client", () => ({
   callWordPressMcp: vi.fn(),
   CINATRA_POST_GET_TOOL: "cinatra-post-get",
   CINATRA_POST_UPDATE_TOOL: "cinatra-post-update",
+  // wordpress-plugin#82 — the six rehomed primitives route through MCP too.
+  CINATRA_POST_STATUS_TOOL: "cinatra-post-status",
+  CINATRA_POSTS_LIST_TOOL: "cinatra-posts-list",
+  CINATRA_POST_DELETE_TOOL: "cinatra-post-delete",
+  CINATRA_MEDIA_UPLOAD_TOOL: "cinatra-media-upload",
+  CINATRA_POST_CREATE_DRAFT_TOOL: "cinatra-post-create-draft",
+  CINATRA_POST_UPDATE_META_TOOL: "cinatra-post-update-meta",
 }));
 import { callWordPressMcp } from "../lib/wordpress-mcp-client";
 
@@ -415,8 +422,11 @@ describe("wordpress_post_update_meta empty-field guard", () => {
     _resetWordPressDepsForTests();
     registerStubDeps();
     handlers = createWordPressPrimitiveHandlers();
+    // wordpress-plugin#82: meta writes reroute to the MCP tool
+    // (cinatra-post-update-meta), NOT the retired updateDraftMeta REST dep.
+    vi.mocked(callWordPressMcp).mockReset();
+    vi.mocked(callWordPressMcp).mockResolvedValue({ id: 10, updated: ["_yoast_wpseo_metadesc"] });
     updateDraftMetaMock.mockReset();
-    updateDraftMetaMock.mockResolvedValue({ ok: true } as any);
     // cinatra#409: meta updates go through the write-authority gate; default ALLOW.
     requireInstanceWriteAuthorityMock.mockReset();
     requireInstanceWriteAuthorityMock.mockResolvedValue(undefined);
@@ -437,19 +447,16 @@ describe("wordpress_post_update_meta empty-field guard", () => {
       mode: "agentic",
     });
 
-    const call = updateDraftMetaMock.mock.calls[0][0] as {
-      instance: unknown;
-      wordpressPostId: number;
-      meta: Record<string, unknown>;
-    };
-
-    expect(call.wordpressPostId).toBe(10);
-    // Pin the FULL meta shape, not just one key. toHaveProperty alone would let an extra key (e.g. an
-    // accidentally-leaked excerpt:"") slip through. Match the
-    // belt-and-braces pattern from the Drupal sibling test
-    // (handlers.test.ts: drupal_node_update strips empty-string ...).
-    expect(call.meta).toEqual({ _yoast_wpseo_metadesc: "Real description" });
-    expect(call.meta).not.toHaveProperty("_yoast_wpseo_focuskw");
+    // MCP-only egress: the meta write reaches the plugin's cinatra-post-update-meta
+    // tool, never the direct-REST dep. Assert the tool + the stripped meta args.
+    expect(callWordPressMcp).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "site-1" }),
+      "cinatra-post-update-meta",
+      { id: 10, meta: { _yoast_wpseo_metadesc: "Real description" } },
+    );
+    const args = vi.mocked(callWordPressMcp).mock.calls[0][2] as { id: number; meta: Record<string, unknown> };
+    expect(args.meta).not.toHaveProperty("_yoast_wpseo_focuskw");
+    expect(updateDraftMetaMock).not.toHaveBeenCalled();
   });
 
   // The handler comment documents the invariant: only literal "" is dropped;
@@ -474,13 +481,13 @@ describe("wordpress_post_update_meta empty-field guard", () => {
       mode: "agentic",
     });
 
-    const call = updateDraftMetaMock.mock.calls[0][0] as {
-      wordpressPostId: number;
+    const args = vi.mocked(callWordPressMcp).mock.calls[0][2] as {
+      id: number;
       meta: Record<string, unknown>;
     };
 
-    expect(call.wordpressPostId).toBe(10);
-    expect(call.meta).toEqual({
+    expect(args.id).toBe(10);
+    expect(args.meta).toEqual({
       _yoast_wpseo_metadesc: "Real description",
       _hide_from_search: false,
       _content_score: 0,
@@ -509,6 +516,7 @@ describe("wordpress_post_update_meta empty-field guard", () => {
       }),
     ).rejects.toThrow(/all submitted meta values were empty/i);
 
+    expect(callWordPressMcp).not.toHaveBeenCalled();
     expect(updateDraftMetaMock).not.toHaveBeenCalled();
   });
 });
@@ -517,7 +525,7 @@ describe("wordpress_post_update_meta empty-field guard", () => {
 // wordpress_pages_list — page discovery routes to the pages content dep
 // (/wp/v2/pages), NOT the posts dep, and paginates like wordpress_posts_list.
 // ---------------------------------------------------------------------------
-describe("wordpress_pages_list — routes to listPublishedPages + paginates", () => {
+describe("wordpress_pages_list — routes to cinatra-posts-list (postType:page) + paginates", () => {
   const SITE = {
     id: "site-1",
     siteUrl: "https://example.com",
@@ -530,17 +538,17 @@ describe("wordpress_pages_list — routes to listPublishedPages + paginates", ()
 
   beforeEach(() => {
     _resetWordPressDepsForTests();
+    vi.mocked(callWordPressMcp).mockReset();
   });
 
-  it("calls listPublishedPages (never listPublishedPosts) and returns a paginated page", async () => {
-    const listPublishedPages = vi.fn(async () => ({
+  it("lists via cinatra-posts-list with postType:'page' (MCP-only) and returns a paginated page", async () => {
+    vi.mocked(callWordPressMcp).mockResolvedValue({
       items: [
         { id: 81, title: "Cinatra UAT Page", status: "publish", date: "2026-01-02T03:04:05", url: "https://example.com/uat-page" },
       ],
       total: 15,
-    }));
-    const listPublishedPosts = vi.fn(async () => ({ items: [], total: 0 }));
-    registerStubDeps({ listMcpInstances: () => [SITE], listPublishedPages, listPublishedPosts });
+    });
+    registerStubDeps({ listMcpInstances: () => [SITE] });
     const handlers = createWordPressPrimitiveHandlers();
 
     const result = await (handlers as any).wordpress_pages_list({
@@ -550,11 +558,11 @@ describe("wordpress_pages_list — routes to listPublishedPages + paginates", ()
       mode: "agentic",
     });
 
-    expect(listPublishedPages).toHaveBeenCalledWith(
+    expect(callWordPressMcp).toHaveBeenCalledWith(
       expect.objectContaining({ id: "site-1" }),
-      { offset: 0, limit: 10 },
+      "cinatra-posts-list",
+      { perPage: 10, offset: 0, postType: "page" },
     );
-    expect(listPublishedPosts).not.toHaveBeenCalled();
     expect(result).toEqual({
       items: [
         { id: 81, title: "Cinatra UAT Page", status: "publish", date: "2026-01-02T03:04:05", url: "https://example.com/uat-page" },
@@ -565,8 +573,8 @@ describe("wordpress_pages_list — routes to listPublishedPages + paginates", ()
   });
 
   it("threads the decoded cursor as the next-page offset", async () => {
-    const listPublishedPages = vi.fn(async () => ({ items: [], total: 25 }));
-    registerStubDeps({ listMcpInstances: () => [SITE], listPublishedPages });
+    vi.mocked(callWordPressMcp).mockResolvedValue({ items: [], total: 25 });
+    registerStubDeps({ listMcpInstances: () => [SITE] });
     const handlers = createWordPressPrimitiveHandlers();
 
     await (handlers as any).wordpress_pages_list({
@@ -576,9 +584,10 @@ describe("wordpress_pages_list — routes to listPublishedPages + paginates", ()
       mode: "agentic",
     });
 
-    expect(listPublishedPages).toHaveBeenCalledWith(
+    expect(callWordPressMcp).toHaveBeenCalledWith(
       expect.objectContaining({ id: "site-1" }),
-      { offset: 10, limit: 10 },
+      "cinatra-posts-list",
+      { perPage: 10, offset: 10, postType: "page" },
     );
   });
 
@@ -614,11 +623,12 @@ describe("wordpress_post_status / wordpress_post_delete — thread postType", ()
 
   beforeEach(() => {
     _resetWordPressDepsForTests();
+    vi.mocked(callWordPressMcp).mockReset();
   });
 
-  it("wordpress_post_status forwards postType:'page' to readPostStatus", async () => {
-    const readPostStatus = vi.fn(async () => ({ id: 81, status: "publish", adminUrl: "a" }));
-    registerStubDeps({ listMcpInstances: () => [SITE], readPostStatus });
+  it("wordpress_post_status forwards postType:'page' to cinatra-post-status (MCP-only)", async () => {
+    vi.mocked(callWordPressMcp).mockResolvedValue({ id: 81, status: "publish", link: "https://example.com/p" });
+    registerStubDeps({ listMcpInstances: () => [SITE] });
     const handlers = createWordPressPrimitiveHandlers();
     await (handlers as any).wordpress_post_status({
       primitiveName: "wordpress_post_status",
@@ -626,14 +636,16 @@ describe("wordpress_post_status / wordpress_post_delete — thread postType", ()
       actor: { actorType: "model", source: "agent" },
       mode: "agentic",
     });
-    expect(readPostStatus).toHaveBeenCalledWith(
-      expect.objectContaining({ wordpressPostId: 81, postType: "page" }),
+    expect(callWordPressMcp).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "site-1" }),
+      "cinatra-post-status",
+      { id: 81, postType: "page" },
     );
   });
 
-  it("wordpress_post_status leaves postType undefined for posts", async () => {
-    const readPostStatus = vi.fn(async () => ({ id: 82, status: "draft", adminUrl: "a" }));
-    registerStubDeps({ listMcpInstances: () => [SITE], readPostStatus });
+  it("wordpress_post_status leaves postType out of the tool args for posts", async () => {
+    vi.mocked(callWordPressMcp).mockResolvedValue({ id: 82, status: "draft" });
+    registerStubDeps({ listMcpInstances: () => [SITE] });
     const handlers = createWordPressPrimitiveHandlers();
     await (handlers as any).wordpress_post_status({
       primitiveName: "wordpress_post_status",
@@ -641,15 +653,17 @@ describe("wordpress_post_status / wordpress_post_delete — thread postType", ()
       actor: { actorType: "model", source: "agent" },
       mode: "agentic",
     });
-    expect(readPostStatus).toHaveBeenCalledWith(
-      expect.objectContaining({ wordpressPostId: 82, postType: undefined }),
+    expect(callWordPressMcp).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "site-1" }),
+      "cinatra-post-status",
+      { id: 82 },
     );
   });
 
-  it("wordpress_post_delete forwards postType:'page' to deletePost (after write authority)", async () => {
-    const deletePost = vi.fn(async () => ({ deleted: true }));
+  it("wordpress_post_delete forwards postType:'page' to cinatra-post-delete (after write authority, MCP-only)", async () => {
+    vi.mocked(callWordPressMcp).mockResolvedValue({ deleted: true, previousStatus: "publish" });
     const requireInstanceWriteAuthority = vi.fn(async () => {});
-    registerStubDeps({ listMcpInstances: () => [SITE], deletePost, requireInstanceWriteAuthority });
+    registerStubDeps({ listMcpInstances: () => [SITE], requireInstanceWriteAuthority });
     const handlers = createWordPressPrimitiveHandlers();
     const res = await (handlers as any).wordpress_post_delete({
       primitiveName: "wordpress_post_delete",
@@ -661,8 +675,10 @@ describe("wordpress_post_status / wordpress_post_delete — thread postType", ()
       instanceId: "site-1",
       primitiveName: "wordpress_post_delete",
     });
-    expect(deletePost).toHaveBeenCalledWith(
-      expect.objectContaining({ wordpressPostId: 81, postType: "page" }),
+    expect(callWordPressMcp).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "site-1" }),
+      "cinatra-post-delete",
+      { id: 81, postType: "page" },
     );
     expect(res).toEqual({ ok: true });
   });
