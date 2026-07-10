@@ -1,0 +1,28 @@
+name: toast-banner-gate
+
+# cinatra-ai/cinatra#1213 (S13 / toast-notifications epic, AC3) — adopt the
+# reusable toast-banner conformance gate. Fails this repo's CI if a
+# searchParams-driven conditional transient banner (a success/destructive
+# <Alert> or a flash-palette colored <div> gated on a flash param) is
+# (re)introduced in src/, instead of the canonical toast layer
+# (cinatraToast / useNotify / the <SearchParamToast> island in @cinatra-ai/sdk-ui).
+#
+# The pin below is PROVISIONAL: the reusable workflow ships in the upcoming
+# cinatra release; this pins the merge-candidate SHA and is bumped to the
+# release SHA (with the matching version comment) at merge, per the pin-bump
+# convention. Double-pin: the `uses:` ref and the `ref` input are the SAME
+# cinatra commit, so the scanner is never pulled from mutable main.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  toast-banner-gate:
+    uses: cinatra-ai/cinatra/.github/workflows/toast-banner-gate-reusable.yml@b681c233cb0bbfe1463acbc5e6f26c667a469a50 # v0.1.9
+    with:
+      ref: b681c233cb0bbfe1463acbc5e6f26c667a469a50
