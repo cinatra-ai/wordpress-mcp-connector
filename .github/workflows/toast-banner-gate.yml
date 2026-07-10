@@ -23,6 +23,6 @@ permissions:
 
 jobs:
   toast-banner-gate:
-    uses: cinatra-ai/cinatra/.github/workflows/toast-banner-gate-reusable.yml@6ca9bfbc50064b07814080ee1964fe0c9a1e21f1 # v0.1.9
+    uses: cinatra-ai/cinatra/.github/workflows/toast-banner-gate-reusable.yml@b681c233cb0bbfe1463acbc5e6f26c667a469a50 # v0.1.9
     with:
-      ref: 6ca9bfbc50064b07814080ee1964fe0c9a1e21f1
+      ref: b681c233cb0bbfe1463acbc5e6f26c667a469a50
