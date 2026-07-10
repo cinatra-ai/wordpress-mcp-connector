@@ -32,6 +32,15 @@ vi.mock("../lib/wordpress-mcp-client", () => ({
   callWordPressMcp: vi.fn(),
   CINATRA_POST_GET_TOOL: "cinatra-post-get",
   CINATRA_POST_UPDATE_TOOL: "cinatra-post-update",
+  // wordpress-plugin#82 — every WordPress content write now dispatches through
+  // the MCP client (the plugin's content tools), so ALL write primitives'
+  // "writer" is callWordPressMcp.
+  CINATRA_POST_STATUS_TOOL: "cinatra-post-status",
+  CINATRA_POSTS_LIST_TOOL: "cinatra-posts-list",
+  CINATRA_POST_DELETE_TOOL: "cinatra-post-delete",
+  CINATRA_MEDIA_UPLOAD_TOOL: "cinatra-media-upload",
+  CINATRA_POST_CREATE_DRAFT_TOOL: "cinatra-post-create-draft",
+  CINATRA_POST_UPDATE_META_TOOL: "cinatra-post-update-meta",
 }));
 import { callWordPressMcp } from "../lib/wordpress-mcp-client";
 
@@ -103,17 +112,21 @@ function registerDepsStub(over?: {
   registerWordPressConnector(base);
 }
 
-// Returns the host writer mock that a given primitive ultimately dispatches to.
+// The "writer" a given primitive ultimately dispatches to. wordpress-plugin#82:
+// EVERY WordPress content write now goes through the MCP client
+// (callWordPressMcp → the plugin's content tools), never a direct-REST dep.
 const WRITER_FOR: Record<string, () => ReturnType<typeof vi.fn>> = {
-  wordpress_post_create_draft: () => createDraftMock,
+  wordpress_post_create_draft: () => vi.mocked(callWordPressMcp),
   wordpress_post_update: () => vi.mocked(callWordPressMcp),
-  wordpress_post_update_meta: () => updateDraftMetaMock,
-  wordpress_post_delete: () => deletePostMock,
-  wordpress_media_upload: () => uploadMediaMock,
+  wordpress_post_update_meta: () => vi.mocked(callWordPressMcp),
+  wordpress_post_delete: () => vi.mocked(callWordPressMcp),
+  wordpress_media_upload: () => vi.mocked(callWordPressMcp),
 };
 
+// The MCP writer PLUS the retired direct-REST deps — after a DENY, NONE of these
+// may fire (belt-and-braces: the old REST deps must never be reached either).
 function allWriterMocks() {
-  return [createDraftMock, vi.mocked(callWordPressMcp), updateDraftMetaMock, deletePostMock, uploadMediaMock];
+  return [vi.mocked(callWordPressMcp), createDraftMock, updateDraftMetaMock, deletePostMock, uploadMediaMock];
 }
 
 describe("cinatra#409 — per-user write authorization in the WordPress MCP write handlers", () => {
@@ -129,7 +142,24 @@ describe("cinatra#409 — per-user write authorization in the WordPress MCP writ
     // The MCP writer (wordpress_post_update) + reader (wordpress_post_get) resolve
     // a default post payload; individual tests override for ordering/deny cases.
     vi.mocked(callWordPressMcp).mockReset();
-    vi.mocked(callWordPressMcp).mockResolvedValue({ id: 10, status: "draft", title: "T", content: "C", excerpt: "E" });
+    // Superset payload so every rerouted helper reads a VALID field: create-draft
+    // (id), media-upload (mediaId, now fail-fast on a missing one), delete
+    // (deleted), status (status), list (items/total), update/get (id + fields).
+    vi.mocked(callWordPressMcp).mockResolvedValue({
+      id: 10,
+      status: "draft",
+      title: "T",
+      content: "C",
+      excerpt: "E",
+      mediaId: 7,
+      sourceUrl: "https://example.com/img.png",
+      deleted: true,
+      previousStatus: "publish",
+      updated: [],
+      items: [],
+      total: 0,
+      link: "https://example.com/p",
+    });
     registerDepsStub();
   });
 

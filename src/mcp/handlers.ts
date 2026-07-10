@@ -21,6 +21,12 @@ import {
   callWordPressMcp,
   CINATRA_POST_GET_TOOL,
   CINATRA_POST_UPDATE_TOOL,
+  CINATRA_POST_STATUS_TOOL,
+  CINATRA_POSTS_LIST_TOOL,
+  CINATRA_POST_DELETE_TOOL,
+  CINATRA_MEDIA_UPLOAD_TOOL,
+  CINATRA_POST_CREATE_DRAFT_TOOL,
+  CINATRA_POST_UPDATE_META_TOOL,
 } from "../lib/wordpress-mcp-client";
 
 // READ-BOUNDARY redaction. A read/list primitive must NEVER emit credential
@@ -269,6 +275,131 @@ async function updatePostViaMcp(input: {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Remaining in-admin content primitives over MCP (wordpress-plugin#82).
+//
+// status / list / delete / media / draft / meta reach WordPress ONLY through the
+// plugin's content MCP server (`callWordPressMcp` → cinatra-post-status /
+// cinatra-posts-list / cinatra-post-delete / cinatra-media-upload /
+// cinatra-post-create-draft / cinatra-post-update-meta), never a direct
+// `/wp/v2/*` REST call. `callWordPressMcp` detects each tool at runtime and
+// throws FAIL-CLOSED when the plugin is missing/too old — it never degrades to
+// direct REST. Each helper maps the plugin ability's output back to the field
+// shape the old direct-REST dep returned so the callers are unchanged.
+//
+// BLOG-PUBLISH CARVE-OUT: the `wordpress_post_create_draft` / `wordpress_media_upload`
+// MCP PRIMITIVES here are the IN-ADMIN assistant's tools, so rerouting them behind
+// MCP affects ONLY the in-admin path. The (non-in-admin) blog-publish pipeline does
+// NOT call these primitives — the blog-wordpress-publish agent uses the
+// `blog_post_publish_wordpress_start` blog primitive, which resolves the post +
+// hero-image artifacts host-side and writes through the published
+// `@cinatra-ai/host:wordpress-content` capability (the connector-owned REST client
+// wired in register.ts). That REST path is DELIBERATELY RETAINED — a non-in-admin
+// caller remains — so blog-publish is unaffected and the direct-REST client is not
+// deleted. The Cinatra plugin thus becomes required for the IN-ADMIN content tools,
+// not for blog-publish. The per-user #409 write-authority gate is unchanged.
+// ---------------------------------------------------------------------------
+
+/** Coerce a raw MCP list item to the metadata-only projection callers expect. */
+function normalizeListItem(raw: unknown): { id: number; title: string; status: string; date: string; url: string } {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const id = Number(r.id);
+  return {
+    id: Number.isFinite(id) ? id : 0,
+    title: asString(r.title),
+    status: asString(r.status) || "unknown",
+    date: asString(r.date),
+    url: asString(r.url),
+  };
+}
+
+/** Read a post/page publish status over MCP (cinatra-post-status). Returns the
+ * shape the old direct-REST readPostStatus returned. */
+async function readPostStatusViaMcp(instance: WordPressMcpInstance, postId: number, postType?: string) {
+  const args: Record<string, unknown> = { id: postId };
+  if (postType !== undefined) args.postType = postType;
+  const raw = (await callWordPressMcp(instance, CINATRA_POST_STATUS_TOOL, args)) as {
+    id?: unknown; status?: unknown; link?: unknown;
+  };
+  const id = Number(raw?.id);
+  const resolvedId = Number.isFinite(id) ? id : postId;
+  const link = typeof raw?.link === "string" && raw.link.length > 0 ? raw.link : undefined;
+  return { id: resolvedId, status: asString(raw?.status) || "unknown", adminUrl: buildAdminUrl(instance.siteUrl, resolvedId), publicUrl: link };
+}
+
+/** List published posts (postType:"page" → pages) over MCP (cinatra-posts-list).
+ * Returns the metadata-only { items, total } the old list deps returned. */
+async function listPublishedViaMcp(
+  instance: WordPressMcpInstance,
+  options: { offset: number; limit: number; postType?: string },
+) {
+  const args: Record<string, unknown> = { perPage: options.limit, offset: options.offset };
+  if (options.postType !== undefined) args.postType = options.postType;
+  const raw = (await callWordPressMcp(instance, CINATRA_POSTS_LIST_TOOL, args)) as {
+    items?: unknown; total?: unknown;
+  };
+  const items = Array.isArray(raw?.items) ? raw.items.map(normalizeListItem) : [];
+  const total = Number(raw?.total);
+  return { items, total: Number.isFinite(total) ? total : items.length };
+}
+
+/** Delete a post/page over MCP (cinatra-post-delete). */
+async function deletePostViaMcp(instance: WordPressMcpInstance, postId: number, postType?: string) {
+  const args: Record<string, unknown> = { id: postId };
+  if (postType !== undefined) args.postType = postType;
+  const raw = (await callWordPressMcp(instance, CINATRA_POST_DELETE_TOOL, args)) as {
+    deleted?: unknown; previousStatus?: unknown;
+  };
+  return { deleted: raw?.deleted === true, previousStatus: typeof raw?.previousStatus === "string" ? raw.previousStatus : undefined };
+}
+
+/** Sideload an image over MCP (cinatra-media-upload). */
+async function uploadMediaViaMcp(
+  instance: WordPressMcpInstance,
+  input: { imageBase64: string; imageMimeType: string; title: string },
+) {
+  const raw = (await callWordPressMcp(instance, CINATRA_MEDIA_UPLOAD_TOOL, {
+    imageBase64: input.imageBase64,
+    imageMimeType: input.imageMimeType,
+    title: input.title,
+  })) as { mediaId?: unknown; sourceUrl?: unknown };
+  const mediaId = Number(raw?.mediaId);
+  // Fail fast: a successful upload MUST carry a real attachment id. A missing/
+  // invalid id is a bad plugin response — surface it rather than returning a
+  // bogus mediaId:0 the caller would treat as a real attachment.
+  if (!Number.isInteger(mediaId) || mediaId < 1) {
+    throw new Error("WordPress media upload returned no valid attachment id.");
+  }
+  return { mediaId, sourceUrl: typeof raw?.sourceUrl === "string" ? raw.sourceUrl : undefined };
+}
+
+/** Create a new draft over MCP (cinatra-post-create-draft). Returns the shape the
+ * old direct-REST createDraft returned ({ wordpressPostId, publicUrl?, adminUrl }). */
+async function createDraftViaMcp(
+  instance: WordPressMcpInstance,
+  input: { title: string; content: string; excerpt: string },
+) {
+  const raw = (await callWordPressMcp(instance, CINATRA_POST_CREATE_DRAFT_TOOL, {
+    title: input.title,
+    content: input.content,
+    excerpt: input.excerpt,
+  })) as { id?: unknown; status?: unknown; link?: unknown };
+  const id = Number(raw?.id);
+  // Fail fast: a created draft MUST carry a real post id. A missing/invalid id
+  // is a bad plugin response — surface it rather than building a bogus
+  // wordpressPostId:0 + `post=0` admin URL the caller would treat as a real draft.
+  if (!Number.isInteger(id) || id < 1) {
+    throw new Error("WordPress draft creation returned no valid post id.");
+  }
+  const link = typeof raw?.link === "string" && raw.link.length > 0 ? raw.link : undefined;
+  return { wordpressPostId: id, publicUrl: link, adminUrl: buildAdminUrl(instance.siteUrl, id) };
+}
+
+/** Write post meta over MCP (cinatra-post-update-meta). Returns { id, updated }. */
+async function updateMetaViaMcp(instance: WordPressMcpInstance, postId: number, meta: Record<string, unknown>) {
+  return callWordPressMcp(instance, CINATRA_POST_UPDATE_META_TOOL, { id: postId, meta });
+}
+
 export function createWordPressPrimitiveHandlers() {
   return {
     "wordpress_status": async (_request: ExtensionPrimitiveRequest<unknown>) => {
@@ -286,10 +417,9 @@ export function createWordPressPrimitiveHandlers() {
       const instance = instances.find((i) => i.id === input.instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
       await requireWriteAuthority(input.instanceId, "wordpress_post_create_draft");
-      return getWordPressDeps().createDraft({
-        instance,
-        payload: { title: input.title, content: input.content, excerpt: input.excerpt, status: "draft" },
-      });
+      // MCP-only egress (wordpress-plugin#82): create the draft through the
+      // plugin's cinatra-post-create-draft tool, never a direct /wp/v2/* POST.
+      return createDraftViaMcp(instance, { title: input.title, content: input.content, excerpt: input.excerpt });
     },
 
     "wordpress_post_status": async (request: ExtensionPrimitiveRequest<unknown>) => {
@@ -297,8 +427,9 @@ export function createWordPressPrimitiveHandlers() {
       const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === input.instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
-      // postType: "page" routes the status read to /wp/v2/pages/{id}.
-      return getWordPressDeps().readPostStatus({ instance, wordpressPostId: input.postId, postType: input.postType });
+      // MCP-only egress (wordpress-plugin#82): read status through the plugin's
+      // cinatra-post-status tool. postType:"page" is forwarded to resolve a page.
+      return readPostStatusViaMcp(instance, input.postId, input.postType);
     },
 
     "wordpress_post_delete": async (request: ExtensionPrimitiveRequest<unknown>) => {
@@ -307,8 +438,9 @@ export function createWordPressPrimitiveHandlers() {
       const instance = instances.find((i) => i.id === input.instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
       await requireWriteAuthority(input.instanceId, "wordpress_post_delete");
-      // postType: "page" routes the delete to /wp/v2/pages/{id}.
-      await getWordPressDeps().deletePost({ instance, wordpressPostId: input.postId, postType: input.postType });
+      // MCP-only egress (wordpress-plugin#82): delete through the plugin's
+      // cinatra-post-delete tool. postType:"page" resolves a page.
+      await deletePostViaMcp(instance, input.postId, input.postType);
       return { ok: true };
     },
 
@@ -318,7 +450,9 @@ export function createWordPressPrimitiveHandlers() {
       const instance = instances.find((i) => i.id === instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
       await requireWriteAuthority(instanceId, "wordpress_media_upload");
-      return getWordPressDeps().uploadMedia({ instance, ...rest });
+      // MCP-only egress (wordpress-plugin#82): sideload through the plugin's
+      // cinatra-media-upload tool, never a direct /wp/v2/media POST.
+      return uploadMediaViaMcp(instance, rest);
     },
 
     "wordpress_posts_list": async (request: ExtensionPrimitiveRequest<unknown>) => {
@@ -328,14 +462,16 @@ export function createWordPressPrimitiveHandlers() {
       if (!instance) throw new Error("WordPress instance not found.");
       const offset = getWordPressDeps().decodeCursor(cursor);
       const limit = 10;
-      const { items, total } = await getWordPressDeps().listPublishedPosts(instance, { offset, limit });
+      // MCP-only egress (wordpress-plugin#82): list through the plugin's
+      // cinatra-posts-list tool, never a direct /wp/v2/posts GET.
+      const { items, total } = await listPublishedViaMcp(instance, { offset, limit });
       return getWordPressDeps().buildListPage(items, total, offset, limit);
     },
 
     // Page discovery. Mirrors wordpress_posts_list exactly (same cursor
-    // pagination + metadata-only projection) but routes to /wp/v2/pages via the
-    // host-bound listPublishedPages dep. Lets an external MCP caller find a
-    // WordPress page, then read or update it with wordpress_post_get /
+    // pagination + metadata-only projection) but lists pages through the plugin's
+    // cinatra-posts-list tool with postType:"page". Lets an external MCP caller
+    // find a WordPress page, then read or update it with wordpress_post_get /
     // wordpress_post_update passing postType: "page".
     "wordpress_pages_list": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const { instanceId, cursor } = postsListSchema.parse(request.input);
@@ -344,7 +480,9 @@ export function createWordPressPrimitiveHandlers() {
       if (!instance) throw new Error("WordPress instance not found.");
       const offset = getWordPressDeps().decodeCursor(cursor);
       const limit = 10;
-      const { items, total } = await getWordPressDeps().listPublishedPages(instance, { offset, limit });
+      // MCP-only egress (wordpress-plugin#82): list pages through the plugin's
+      // cinatra-posts-list tool with postType:"page", never a direct /wp/v2/pages GET.
+      const { items, total } = await listPublishedViaMcp(instance, { offset, limit, postType: "page" });
       return getWordPressDeps().buildListPage(items, total, offset, limit);
     },
 
@@ -358,7 +496,9 @@ export function createWordPressPrimitiveHandlers() {
       if (!instance) throw new Error("WordPress instance not found.");
       const offset = getWordPressDeps().decodeCursor(cursor);
       const limit = 10;
-      const { items, total } = await getWordPressDeps().listPublishedPosts(instance, { offset, limit });
+      // MCP-only egress (wordpress-plugin#82): list through the plugin's
+      // cinatra-posts-list tool, never a direct /wp/v2/posts GET.
+      const { items, total } = await listPublishedViaMcp(instance, { offset, limit });
       return getWordPressDeps().buildListPage(items, total, offset, limit);
     },
 
@@ -398,7 +538,10 @@ export function createWordPressPrimitiveHandlers() {
       if (Object.keys(safeMeta).length === 0) {
         throw new Error("All submitted meta values were empty strings — nothing to update.");
       }
-      return getWordPressDeps().updateDraftMeta({ instance, wordpressPostId: postId, meta: safeMeta });
+      // MCP-only egress (wordpress-plugin#82): write meta through the plugin's
+      // cinatra-post-update-meta tool (which enforces the per-key protected-meta
+      // guard host-in-process), never a direct /wp/v2/* meta write.
+      return updateMetaViaMcp(instance, postId, safeMeta);
     },
 
     // Top-level WordPress post update (title/content/excerpt/status) over the
