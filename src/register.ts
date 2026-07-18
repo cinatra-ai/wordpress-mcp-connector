@@ -23,13 +23,18 @@
 
 import { randomBytes, randomUUID } from "node:crypto";
 
-import type { ExtensionHostContext } from "@cinatra-ai/sdk-extensions";
+import type { ExtensionHostContext, ObjectsProvider } from "@cinatra-ai/sdk-extensions";
 import { registerWordPressConnector, type WordPressConnectorDeps } from "./deps";
 import {
   createWordPressClient,
   type WordPressClient,
   type WordPressInstanceSettings,
 } from "./lib/wordpress-client";
+import {
+  buildWordPressPointerActor,
+  writeWordPressPostPointerWith,
+  type WordPressPointerState,
+} from "./integration/pointer-writer-core";
 
 const PACKAGE_NAME = "@cinatra-ai/wordpress-mcp-connector";
 
@@ -378,6 +383,54 @@ function buildWordPressInstanceAdminProvider(client: WordPressClient) {
   };
 }
 
+// --- WordPress external-pointer registration (cinatra#1464, epic #1448) -------
+// The connector's half of the `wordpress:post` pointer lifecycle: it WRITES
+// pointer rows for the HOST-registered `@cinatra-ai/wordpress:post` type
+// (packages/objects/.../register-types.ts) through the host objects surface. The
+// TRIGGERS — the post-published webhook sync and the periodic
+// linked→stale→dangling verification sweep — resolve the
+// `wordpress-pointer-writer` capability and supply the probe-derived reference
+// state + the org/user the pointer actor is minted from (the twenty-pointer-writer
+// precedent: the connector ships the writer, the host wires the caller). Resolving
+// the objects provider does NO I/O at registration; the impl fails loud at WRITE
+// time if the host never wired the objects surface (an old host), so a pointer is
+// never written unguarded.
+
+/** The host objects-integration service shape (structural mirror — the connector
+ * compiles against any host SDK that meets it; the host binds the real
+ * `objectTypeRegistry` / `objects_save` surface at boot). */
+type HostObjectsIntegrationShape = { getObjectsProvider(): ObjectsProvider | null };
+
+/** Resolve the host objects provider, or null when the host never published the
+ * objects-integration service. */
+function hostObjectsProvider(ctx: ExtensionHostContext): ObjectsProvider | null {
+  const provider = ctx.capabilities.resolveProviders("@cinatra-ai/host:objects-integration")[0];
+  return (provider?.impl as HostObjectsIntegrationShape | undefined)?.getObjectsProvider() ?? null;
+}
+
+/** The `wordpress-pointer-writer` capability payload: a post identity + its
+ * probe-derived reference state + the org/user the pointer actor is minted from. */
+export type WordPressPointerWriteRequest = {
+  /** Connected-site (instance) id — the WP post id is site-scoped. */
+  instanceId: string;
+  /** WordPress post id (unique within the site). */
+  postId: number | string;
+  /** Absolute http(s) URL that opens the post in WordPress. */
+  url: string;
+  /** Probe-derived reference state (defaults `linked`). */
+  state?: WordPressPointerState;
+  title?: string;
+  excerpt?: string;
+  /** Upstream version (WordPress `modified_gmt`) for the next probe's diff. */
+  remoteVersion?: string;
+  /** ISO timestamp of the sync that materialized/verified the pointer. */
+  verifiedAt?: string;
+  /** The org the pointer row is scoped to (REQUIRED — objects_save rejects a null org). */
+  orgId: string;
+  /** The user, when the trigger is user-attributed. */
+  userId?: string | null;
+};
+
 export function register(ctx: ExtensionHostContext): void {
   // Transport-DI inversion: bind the host deps slot. Always-bind (the
   // bind-if-absent skew guard was swept once every host this connector can
@@ -419,5 +472,29 @@ export function register(ctx: ExtensionHostContext): void {
   ctx.capabilities.registerProvider("@cinatra-ai/host:wordpress-mcp", {
     packageName: PACKAGE_NAME,
     impl: buildWordPressInstanceAdminProvider(wordpressClient),
+  });
+
+  // cinatra#1464 — the connector-owned `wordpress:post` pointer writer. The host
+  // sync/webhook trigger resolves this capability and supplies the post identity
+  // + probe-derived reference state + org/user; the impl mints the pointer actor
+  // and upserts the pointer row (idempotent by instance + post id) through the
+  // host objects surface. Building the impl does NO host-service resolution and
+  // NO I/O (probe-safe) — the objects provider resolves lazily at write time.
+  ctx.capabilities.registerProvider("wordpress-pointer-writer", {
+    packageName: PACKAGE_NAME,
+    impl: {
+      writePointer: async (request: WordPressPointerWriteRequest) => {
+        const provider = hostObjectsProvider(ctx);
+        if (!provider) {
+          throw new Error(`${PACKAGE_NAME}: host objects surface is not wired`);
+        }
+        const { orgId, userId, ...pointer } = request;
+        return writeWordPressPostPointerWith(
+          provider,
+          pointer,
+          buildWordPressPointerActor({ orgId, userId: userId ?? null }),
+        );
+      },
+    },
   });
 }
