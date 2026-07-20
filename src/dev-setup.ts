@@ -323,23 +323,58 @@ export type WordPressFirstWireOutcome =
   | { ok: false; reason: string };
 
 /**
+ * First-wire validated-save retry policy. A freshly `wp-cli`-minted application
+ * password does not always authenticate `/users/me` on the FIRST REST request
+ * of a dev boot (short-lived WordPress-side propagation of the new credential):
+ * the very same password validates a beat later. Retrying the network-validated
+ * save with a bounded backoff — REUSING the same minted password (never a
+ * re-mint, so the admin's application-password list never churns) — lands a
+ * VALIDATED credential inside a SINGLE boot instead of deferring to a second
+ * boot's reconcile. Injectable so unit tests drive the retry with a no-op sleep.
+ */
+export type FirstWireRetryOptions = {
+  /** Total validated-save attempts (>= 1). Default 4. */
+  maxAttempts?: number;
+  /** Backoff before attempt N (N is 1-indexed for retries). Default 1s,2s,4s. */
+  backoffMsForAttempt?: (attempt: number) => number;
+  /** Injected delay (tests pass a no-op). Default real setTimeout. */
+  sleep?: (ms: number) => Promise<void>;
+};
+
+const DEFAULT_FIRST_WIRE_BACKOFF_MS = [1000, 2000, 4000];
+
+function defaultBackoffMsForAttempt(attempt: number): number {
+  // attempt 1 → wait 1s, 2 → 2s, 3+ → 4s (capped).
+  return DEFAULT_FIRST_WIRE_BACKOFF_MS[attempt - 1] ?? DEFAULT_FIRST_WIRE_BACKOFF_MS[DEFAULT_FIRST_WIRE_BACKOFF_MS.length - 1];
+}
+
+function realSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
  * First wire (no existing instance): mint an application password and land a
  * COMPLETE local WordPress instance row; the caller then pushes the browser
  * widget config.
  *
- * RESILIENCE (the host #260 Step-7 fix, preserved): the happy path is the
- * network-validated save; on a validation throw fall back to the UNVALIDATED
- * local-dev persist (complete row, best-effort Nango import) so the widget
- * wiring still lands — the next boot's reconcile re-probes + re-validates.
- * Returns `{ ok: false }` ONLY when no COMPLETE row could be persisted at all
- * (the caller then pushes NOTHING — a dangling `cinatra_instance_id` would
- * never authorize against widget-stream auth).
+ * SINGLE-BOOT VALIDATION (cinatra#1238): the happy path is the network-validated
+ * save. A freshly minted app-password can transiently 401 on the first REST
+ * request of the boot, so the validated save is retried with a bounded backoff
+ * REUSING the same minted password (no re-mint → no app-password churn); the
+ * URL-keyed probe cache is evicted before each retry so no stale `auth_error`
+ * verdict is served. Only after the retries exhaust does it fall back to the
+ * UNVALIDATED local-dev persist (the host #260 Step-7 resilience: a complete
+ * row + best-effort Nango import so the widget wiring still lands and a later
+ * boot's reconcile re-validates). Returns `{ ok: false }` ONLY when no COMPLETE
+ * row could be persisted at all (the caller then pushes NOTHING — a dangling
+ * `cinatra_instance_id` would never authorize against widget-stream auth).
  *
  * SECRET BOUNDARY: never logs the minted application password; failure reasons
  * are fixed connector-owned labels.
  */
 export async function firstWireWordPressInstance(
   deps: WordPressDevSetupDeps,
+  retry: FirstWireRetryOptions = {},
 ): Promise<WordPressFirstWireOutcome> {
   const appPassword = mintWordPressAppPassword(deps.helpers);
   if (!appPassword) {
@@ -351,23 +386,49 @@ export async function firstWireWordPressInstance(
   // fallback land the SAME id (no dangling/duplicated instance_id).
   const instanceId = randomUUID();
 
+  const maxAttempts = Math.max(1, retry.maxAttempts ?? 4);
+  const backoffMsForAttempt = retry.backoffMsForAttempt ?? defaultBackoffMsForAttempt;
+  const sleep = retry.sleep ?? realSleep;
+
   let persistedId: string = instanceId;
   let connectionId: string = instanceId;
   let validated = false;
-  try {
-    const saved = await deps.wp.devSaveInstance?.({
-      id: instanceId,
-      siteUrl: LOCAL_WORDPRESS.siteUrl,
-      username: LOCAL_WORDPRESS.adminUser,
-      applicationPassword: appPassword,
-    });
-    if (!saved) throw new Error("devSaveInstance unavailable");
-    persistedId = saved.id;
-    connectionId = saved.connectionId ?? saved.id;
-    validated = true;
-  } catch {
-    // A first-wire validation throw falls back to the complete unvalidated
-    // local-dev persist rather than aborting the whole wire.
+  let writerUnavailable = false;
+  for (let attempt = 1; attempt <= maxAttempts && !validated && !writerUnavailable; attempt++) {
+    if (attempt > 1) {
+      // Evict any stale URL-keyed `auth_error` probe verdict so the re-validate
+      // (and the subsequent reconcile/widget path) re-evaluates the fresh
+      // credential, then wait out the short WP-side propagation window.
+      deps.wp.devInvalidateProbeCache?.(LOCAL_WORDPRESS.siteUrl);
+      await sleep(backoffMsForAttempt(attempt - 1));
+    }
+    try {
+      const saved = await deps.wp.devSaveInstance?.({
+        id: instanceId,
+        siteUrl: LOCAL_WORDPRESS.siteUrl,
+        username: LOCAL_WORDPRESS.adminUser,
+        applicationPassword: appPassword,
+      });
+      if (!saved) {
+        // The host does not publish the validated writer (older host) — retrying
+        // cannot help; fall through to the unvalidated persist immediately.
+        writerUnavailable = true;
+        break;
+      }
+      persistedId = saved.id;
+      connectionId = saved.connectionId ?? saved.id;
+      validated = true;
+    } catch {
+      // Validation threw (most likely a transient first-wire 401 while the new
+      // application password propagates) — retry after the backoff. SECRET
+      // BOUNDARY: the thrown message can carry remote body text — never read it.
+    }
+  }
+
+  if (!validated) {
+    // A first-wire validation that never passed within the retry budget falls
+    // back to the complete unvalidated local-dev persist rather than aborting
+    // the whole wire.
     try {
       const persisted = await deps.wp.devPersistLocalInstanceUnvalidated?.({
         id: instanceId,
@@ -384,7 +445,7 @@ export async function firstWireWordPressInstance(
       return { ok: false, reason: "saveWordPressInstance failed (first wire)" };
     }
     deps.log(
-      "first-wire connection validation did not pass; persisted a local-dev instance + pushed the widget config anyway. " +
+      "first-wire connection validation did not pass within the retry budget; persisted a local-dev instance + pushed the widget config anyway. " +
         "WordPress MCP writes 401 until the credential validates; the next boot re-probes and reconciles.",
     );
   }

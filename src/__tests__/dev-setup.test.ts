@@ -288,6 +288,8 @@ describe("ensureWordPressAppPasswordReconciled", () => {
 // ===========================================================================
 describe("firstWireWordPressInstance — resilient first wire", () => {
   const FIRST_WIRE_PW = "wxyz ABCD efgh IJKL";
+  // Drive the bounded validated-save retry deterministically + instantly.
+  const FAST_RETRY = { maxAttempts: 3, sleep: async () => {} } as const;
 
   it("HAPPY PATH: validated save + Nango both-halves in sync → working, no fallback", async () => {
     const t = makeDeps();
@@ -296,13 +298,16 @@ describe("firstWireWordPressInstance — resilient first wire", () => {
     // post-save both-halves readback resolves to the minted credential
     t.getNangoCredentials.mockResolvedValueOnce({ username: "admin", password: FIRST_WIRE_PW });
 
-    const r = await firstWireWordPressInstance(t.deps);
+    const r = await firstWireWordPressInstance(t.deps, FAST_RETRY);
 
     expect(r.ok).toBe(true);
     if (!r.ok) throw new Error("expected ok");
     expect(r.instanceId).toBe("validated-1");
     expect(r.reconcile).toMatchObject({ working: true, rotated: false });
     expect(r.reconcile.note).toMatch(/first-wire minted \+ nango-synced/);
+    // A validated first attempt does NOT re-invalidate the probe cache (no retry).
+    expect(t.devSaveInstance).toHaveBeenCalledTimes(1);
+    expect(t.devInvalidateProbeCache).not.toHaveBeenCalled();
     // devSaveInstance is called with the up-front generated id (a uuid).
     expect(t.devSaveInstance).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -314,10 +319,42 @@ describe("firstWireWordPressInstance — resilient first wire", () => {
     expect(t.devPersistLocalInstanceUnvalidated).not.toHaveBeenCalled();
   });
 
-  it("RESILIENCE: the validated save throws → falls back to a COMPLETE local-dev persist + Nango synced; instance still lands", async () => {
+  it("SINGLE-BOOT RETRY (cinatra#1238): a transient first-wire 401 then a validated retry → VALIDATED, no fallback, same minted password", async () => {
+    const t = makeDeps();
+    t.docker.mockReturnValueOnce({ code: 0, out: `${FIRST_WIRE_PW}\n` }); // mint (once)
+    // Attempt 1 throws (transient propagation 401); attempt 2 validates.
+    t.devSaveInstance
+      .mockRejectedValueOnce(new Error("Nango connected successfully, but WordPress rejected the authenticated API request."))
+      .mockResolvedValueOnce({ id: "validated-retry", connectionId: "validated-retry" });
+    t.getNangoCredentials.mockResolvedValueOnce({ username: "admin", password: FIRST_WIRE_PW });
+
+    const r = await firstWireWordPressInstance(t.deps, FAST_RETRY);
+
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("expected ok");
+    expect(r.instanceId).toBe("validated-retry");
+    // A VALIDATED credential in a SINGLE boot — the whole point of #1238.
+    expect(r.reconcile).toMatchObject({ working: true, rotated: false });
+    expect(r.reconcile.note).toMatch(/first-wire minted \+ nango-synced/);
+    // Exactly two validated-save attempts, and NO re-mint (docker exec once).
+    expect(t.devSaveInstance).toHaveBeenCalledTimes(2);
+    expect(t.docker).toHaveBeenCalledTimes(1);
+    // Both attempts used the SAME minted password + SAME up-front id.
+    const firstPw = t.devSaveInstance.mock.calls[0][0].applicationPassword;
+    const secondPw = t.devSaveInstance.mock.calls[1][0].applicationPassword;
+    expect(firstPw).toBe(FIRST_WIRE_PW);
+    expect(secondPw).toBe(FIRST_WIRE_PW);
+    expect(t.devSaveInstance.mock.calls[1][0].id).toBe(t.devSaveInstance.mock.calls[0][0].id);
+    // The probe cache is evicted before the retry so no stale auth_error verdict.
+    expect(t.devInvalidateProbeCache).toHaveBeenCalledWith("http://localhost:8080");
+    // No fallback to the unvalidated persist.
+    expect(t.devPersistLocalInstanceUnvalidated).not.toHaveBeenCalled();
+  });
+
+  it("RESILIENCE: validation throws on EVERY attempt → falls back to a COMPLETE local-dev persist + Nango synced; instance still lands", async () => {
     const t = makeDeps();
     t.docker.mockReturnValueOnce({ code: 0, out: FIRST_WIRE_PW }); // mint
-    t.devSaveInstance.mockRejectedValueOnce(new Error("Unable to retrieve the WordPress site title."));
+    t.devSaveInstance.mockRejectedValue(new Error("Unable to retrieve the WordPress site title."));
     t.devPersistLocalInstanceUnvalidated.mockResolvedValueOnce({
       id: "fallback-1",
       connectionId: "fallback-1",
@@ -325,10 +362,12 @@ describe("firstWireWordPressInstance — resilient first wire", () => {
     // post-persist both-halves readback resolves to the minted credential
     t.getNangoCredentials.mockResolvedValueOnce({ username: "admin", password: FIRST_WIRE_PW });
 
-    const r = await firstWireWordPressInstance(t.deps);
+    const r = await firstWireWordPressInstance(t.deps, FAST_RETRY);
 
     expect(r.ok).toBe(true);
     if (!r.ok) throw new Error("expected ok");
+    // All attempts exhausted before the fallback.
+    expect(t.devSaveInstance).toHaveBeenCalledTimes(3);
     // The fallback's persisted id is the source of truth for the widget config.
     expect(r.instanceId).toBe("fallback-1");
     // Credential unconfirmed (validation never passed) but the instance is
@@ -353,14 +392,14 @@ describe("firstWireWordPressInstance — resilient first wire", () => {
   it("SECRET BOUNDARY: a save throw whose message embeds the app-password never leaks into the surfaced note", async () => {
     const t = makeDeps();
     t.docker.mockReturnValueOnce({ code: 0, out: FIRST_WIRE_PW });
-    t.devSaveInstance.mockRejectedValueOnce(new Error(`remote-leak-${FIRST_WIRE_PW}`));
+    t.devSaveInstance.mockRejectedValue(new Error(`remote-leak-${FIRST_WIRE_PW}`));
     t.devPersistLocalInstanceUnvalidated.mockResolvedValueOnce({
       id: "fallback-2",
       connectionId: "fallback-2",
     });
     t.getNangoCredentials.mockResolvedValueOnce({ username: "admin", password: FIRST_WIRE_PW });
 
-    const r = await firstWireWordPressInstance(t.deps);
+    const r = await firstWireWordPressInstance(t.deps, FAST_RETRY);
 
     expect(r.ok).toBe(true);
     if (!r.ok) throw new Error("expected ok");
@@ -368,12 +407,30 @@ describe("firstWireWordPressInstance — resilient first wire", () => {
     expect(r.reconcile.note ?? "").not.toContain(FIRST_WIRE_PW);
   });
 
+  it("WRITER UNAVAILABLE (older host): devSaveInstance returns falsy → NO retry, immediate unvalidated fallback", async () => {
+    const t = makeDeps();
+    t.docker.mockReturnValueOnce({ code: 0, out: FIRST_WIRE_PW });
+    // Returns undefined (member not published) — retrying cannot help.
+    t.devSaveInstance.mockResolvedValue(undefined);
+    t.devPersistLocalInstanceUnvalidated.mockResolvedValueOnce({ id: "fallback-3", connectionId: "fallback-3" });
+    t.getNangoCredentials.mockResolvedValueOnce({ username: "admin", password: FIRST_WIRE_PW });
+
+    const r = await firstWireWordPressInstance(t.deps, FAST_RETRY);
+
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("expected ok");
+    // Exactly ONE attempt — a falsy return is terminal, not retried.
+    expect(t.devSaveInstance).toHaveBeenCalledTimes(1);
+    expect(t.devInvalidateProbeCache).not.toHaveBeenCalled();
+    expect(r.instanceId).toBe("fallback-3");
+  });
+
   it("HARD ERROR: an app-password MINT failure → {ok:false} with a fixed reason — caller hard-errors, no persist attempted", async () => {
     const t = makeDeps();
     // wp-cli returns an Error line → mintWordPressAppPassword() → null
     t.docker.mockReturnValueOnce({ code: 0, out: "Error: could not create application password" });
 
-    const r = await firstWireWordPressInstance(t.deps);
+    const r = await firstWireWordPressInstance(t.deps, FAST_RETRY);
 
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error("expected not-ok");
@@ -385,10 +442,10 @@ describe("firstWireWordPressInstance — resilient first wire", () => {
   it("UNRECOVERABLE: both validated save AND the unvalidated fallback throw → {ok:false} with a FIXED reason (no secret leak)", async () => {
     const t = makeDeps();
     t.docker.mockReturnValueOnce({ code: 0, out: FIRST_WIRE_PW });
-    t.devSaveInstance.mockRejectedValueOnce(new Error("validate-throw"));
+    t.devSaveInstance.mockRejectedValue(new Error("validate-throw"));
     t.devPersistLocalInstanceUnvalidated.mockRejectedValueOnce(new Error(`persist-leak-${FIRST_WIRE_PW}`));
 
-    const r = await firstWireWordPressInstance(t.deps);
+    const r = await firstWireWordPressInstance(t.deps, FAST_RETRY);
 
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error("expected not-ok");
