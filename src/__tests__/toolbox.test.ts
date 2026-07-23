@@ -1,8 +1,19 @@
 // Verifies the first-party WordPress external-MCP toolbox (manifest-discovered
-// builder). Instance settings, the cached mcp-adapter probe, the endpoint
-// resolution, and the private-URL policy come through the host-bound deps
-// (wired in src/lib/register-transport-connectors.ts; stubbed here). The
-// Basic auth header is built in this extension from the instance credentials.
+// builder) in its S0 (cinatra#2015) guarded state:
+//
+//   - `createWordPressExternalMcpToolbox().buildTools` is pinned to `[]` in
+//     EVERY configuration — the hard default-off guard that only S4
+//     (trusted-site mode, cinatra#2019) replaces with the real per-instance
+//     opt-in gate. S4 flips these pins deliberately; nothing else may.
+//   - `buildTrustedSiteToolSet` (the construction S4 will wire behind that
+//     gate) keeps every underlying behavior pinned so the S4 flip cannot
+//     resurrect rotten code: per-instance authorization, private-URL policy,
+//     probe gating, Basic-auth header construction, immutable naming, and the
+//     current approval vocabulary.
+//
+// Instance settings, the cached mcp-adapter probe, the endpoint resolution,
+// and the private-URL policy come through the host-bound deps (wired in
+// src/lib/register-transport-connectors.ts; stubbed here).
 
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { Buffer } from "node:buffer";
@@ -12,7 +23,11 @@ import {
   _resetWordPressDepsForTests,
   type WordPressMcpInstance,
 } from "../deps";
-import { createWordPressExternalMcpToolbox } from "../mcp/toolbox";
+import {
+  buildTrustedSiteToolSet,
+  createWordPressExternalMcpToolbox,
+  wordpressToolboxServerLabel,
+} from "../mcp/toolbox";
 
 const listMcpInstances = vi.fn<() => WordPressMcpInstance[]>(() => []);
 const probeMcpAdapter = vi.fn();
@@ -56,8 +71,8 @@ beforeEach(() => {
     deletePost: vi.fn(async () => ({ deleted: true })),
     uploadMedia: vi.fn(),
     updateDraftMeta: vi.fn(),
-    // cinatra#409 per-instance `use` authority gate — the external-MCP toolbox
-    // now gates EACH instance through this before emitting its credentials.
+    // cinatra#409 per-instance `use` authority gate — the trusted-site tool
+    // set gates EACH instance through this before emitting its credentials.
     // Default stub allows; tests override to deny.
     requireInstanceWriteAuthority,
   });
@@ -67,15 +82,56 @@ afterEach(() => {
   _resetWordPressDepsForTests();
 });
 
-describe("createWordPressExternalMcpToolbox().buildTools", () => {
-  it("returns [] when no instances configured", async () => {
+// ---------------------------------------------------------------------------
+// S0 hard guard (cinatra#2015) — flipped ONLY by S4 (cinatra#2019)
+// ---------------------------------------------------------------------------
+
+describe("createWordPressExternalMcpToolbox().buildTools — S0 hard guard", () => {
+  it("emits ZERO entries with no instances configured", async () => {
     listMcpInstances.mockReturnValue([]);
     expect(await createWordPressExternalMcpToolbox().buildTools("openai")).toEqual([]);
   });
 
+  it("emits ZERO entries even in the maximal configuration (instances present, authorized, adapter registered)", async () => {
+    // This is the configuration that WOULD inject before S0: reachable public
+    // instance, per-instance authority allows, probe registered. The guard
+    // must still emit nothing — repairing the approval vocabulary must not
+    // revive unrestricted native injection before the S4 opt-in gate exists.
+    listMcpInstances.mockReturnValue([inst("a"), inst("b")]);
+    requireInstanceWriteAuthority.mockResolvedValue(undefined);
+    probeMcpAdapter.mockResolvedValue("registered");
+
+    expect(await createWordPressExternalMcpToolbox().buildTools("openai")).toEqual([]);
+
+    // The guard sits BEFORE any per-instance work: no enumeration, no
+    // authority resolution, no probe, no credential ever touched.
+    expect(listMcpInstances).not.toHaveBeenCalled();
+    expect(requireInstanceWriteAuthority).not.toHaveBeenCalled();
+    expect(probeMcpAdapter).not.toHaveBeenCalled();
+  });
+
+  it("emits ZERO entries for every provider argument", async () => {
+    listMcpInstances.mockReturnValue([inst("a")]);
+    for (const provider of ["openai", "anthropic", "google", ""]) {
+      expect(await createWordPressExternalMcpToolbox().buildTools(provider)).toEqual([]);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The trusted-site tool set S4 wires behind its opt-in gate — kept fully
+// pinned here so the flip cannot resurrect rotten code.
+// ---------------------------------------------------------------------------
+
+describe("buildTrustedSiteToolSet (S4-gated construction)", () => {
+  it("returns [] when no instances configured", async () => {
+    listMcpInstances.mockReturnValue([]);
+    expect(await buildTrustedSiteToolSet("openai")).toEqual([]);
+  });
+
   it("skips private URLs (localhost) — never returned to LLM", async () => {
     listMcpInstances.mockReturnValue([inst("a", "http://localhost:8081")]);
-    expect(await createWordPressExternalMcpToolbox().buildTools("openai")).toEqual([]);
+    expect(await buildTrustedSiteToolSet("openai")).toEqual([]);
     expect(probeMcpAdapter).not.toHaveBeenCalled();
   });
 
@@ -83,7 +139,7 @@ describe("createWordPressExternalMcpToolbox().buildTools", () => {
     listMcpInstances.mockReturnValue([inst("a"), inst("b")]);
     probeMcpAdapter.mockResolvedValueOnce("not_installed").mockResolvedValueOnce("registered");
 
-    const result = await createWordPressExternalMcpToolbox().buildTools("openai");
+    const result = await buildTrustedSiteToolSet("openai");
 
     expect(result).toHaveLength(1);
     expect(result[0].serverLabel).toBe("wordpress-b");
@@ -93,7 +149,7 @@ describe("createWordPressExternalMcpToolbox().buildTools", () => {
     const a = inst("a");
     listMcpInstances.mockReturnValue([a]);
 
-    const result = await createWordPressExternalMcpToolbox().buildTools("openai");
+    const result = await buildTrustedSiteToolSet("openai");
 
     expect(result).toHaveLength(1);
     expect(result[0]).toEqual({
@@ -105,9 +161,7 @@ describe("createWordPressExternalMcpToolbox().buildTools", () => {
       serverDescription:
         "WordPress site Site a (https://site-a.example.com) — MCP adapter",
       allowedTools: null,
-      // Writes require approval (was "never") — see the
-      // dedicated requireApproval regression test below.
-      requireApproval: "read-only",
+      approval: "auto_execute",
     });
   });
 
@@ -115,22 +169,42 @@ describe("createWordPressExternalMcpToolbox().buildTools", () => {
     _resetWordPressDepsForTests();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    const result = await createWordPressExternalMcpToolbox().buildTools("openai");
+    const result = await buildTrustedSiteToolSet("openai");
 
     expect(result).toEqual([]);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
   });
 
-  it("emitted tool gates writes — requireApproval is 'read-only', not 'never'", async () => {
-    // WP mcp-adapter tool names are not enumerable (external plugin) so we gate
-    // writes by approval semantics, not by an unauthoritative static allowlist.
-    // A state-mutating tool must never be auto-approved.
-    listMcpInstances.mockReturnValue([inst("a")]);
-    const result = await createWordPressExternalMcpToolbox().buildTools("openai");
-    expect(result).toHaveLength(1);
-    expect(result[0].requireApproval).toBe("read-only");
-    expect(result[0].requireApproval).not.toBe("never");
+  // === Approval vocabulary (cinatra#2015 deliverable 1) ===
+  describe("approval vocabulary", () => {
+    it("emits the CURRENT vocabulary: approval 'auto_execute', and never the retired requireApproval key", async () => {
+      // The old entry carried the retired `requireApproval` token, which the
+      // host sanitizer drops fail-closed — the toolbox injected NOTHING. The
+      // repaired entry uses the current vocabulary. auto_execute is correct
+      // for this path: S4 injects only the descriptor-verified trusted-READ
+      // set; writes go through the governed invoker (M1) with its own audit
+      // and destructive confirmation, never through provider-direct injection.
+      listMcpInstances.mockReturnValue([inst("a")]);
+      const result = await buildTrustedSiteToolSet("openai");
+      expect(result).toHaveLength(1);
+      expect(result[0].approval).toBe("auto_execute");
+      expect("requireApproval" in result[0]).toBe(false);
+    });
+  });
+
+  // === Immutable naming (cinatra#2015 deliverable 5) ===
+  describe("immutable toolbox naming", () => {
+    it("pins the label format wordpress-${instance.id}", () => {
+      expect(wordpressToolboxServerLabel("abc-123")).toBe("wordpress-abc-123");
+    });
+
+    it("the emitted tool uses exactly the pinned label helper", async () => {
+      listMcpInstances.mockReturnValue([inst("pin-me")]);
+      const result = await buildTrustedSiteToolSet("openai");
+      expect(result).toHaveLength(1);
+      expect(result[0].serverLabel).toBe(wordpressToolboxServerLabel("pin-me"));
+    });
   });
 
   // === Authorization regression coverage ===
@@ -146,7 +220,7 @@ describe("createWordPressExternalMcpToolbox().buildTools", () => {
       listMcpInstances.mockReturnValue([inst("a"), inst("b")]);
       requireInstanceWriteAuthority.mockRejectedValue(new Error("not authorized"));
 
-      const result = await createWordPressExternalMcpToolbox().buildTools("openai");
+      const result = await buildTrustedSiteToolSet("openai");
 
       // No credentialed MCP server is emitted for ANY instance — the cross-actor
       // / no-actor unauthorized path injects nothing.
@@ -165,7 +239,7 @@ describe("createWordPressExternalMcpToolbox().buildTools", () => {
         if (instanceId === "b-other-org") throw new Error("cross-tenant: no use grant for this org");
       });
 
-      const result = await createWordPressExternalMcpToolbox().buildTools("openai");
+      const result = await buildTrustedSiteToolSet("openai");
 
       // Only the instance the actor is authorized to use is exposed; the other
       // tenant's credentials are never emitted.
@@ -180,7 +254,7 @@ describe("createWordPressExternalMcpToolbox().buildTools", () => {
       listMcpInstances.mockReturnValue([a]);
       requireInstanceWriteAuthority.mockResolvedValue(undefined);
 
-      const result = await createWordPressExternalMcpToolbox().buildTools("openai");
+      const result = await buildTrustedSiteToolSet("openai");
 
       expect(result).toHaveLength(1);
       expect(result[0].serverLabel).toBe("wordpress-a");
@@ -197,14 +271,7 @@ describe("createWordPressExternalMcpToolbox().buildTools", () => {
       listMcpInstances.mockReturnValue([inst("a")]);
       requireInstanceWriteAuthority.mockResolvedValue(undefined);
 
-      // The SDK contract is still the narrow `buildTools(provider)`; the widened
-      // actor-frame parameter is connector-local forward-compat (see
-      // WordPressToolboxActor in ../mcp/toolbox), so call through the widened shape.
-      const buildTools = createWordPressExternalMcpToolbox().buildTools as (
-        provider: string,
-        actor?: { userId?: string; organizationId?: string },
-      ) => Promise<unknown[]>;
-      const result = await buildTools("openai", {
+      const result = await buildTrustedSiteToolSet("openai", {
         userId: "",
         organizationId: "",
       });
