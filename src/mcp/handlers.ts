@@ -20,6 +20,11 @@ import {
   type WidgetActorOverride,
 } from "../deps";
 import {
+  evaluateStagedContentWrite,
+  type CmsCurrentContent,
+} from "../integration/cms-review-trigger";
+import { WORDPRESS_CONNECTOR_ID } from "../integration/pointer-writer-core";
+import {
   callWordPressMcp,
   CINATRA_POST_GET_TOOL,
   CINATRA_POST_UPDATE_TOOL,
@@ -598,11 +603,56 @@ export function createWordPressPrimitiveHandlers() {
       // cinatra#409 — per-user / per-instance write authorization (fail-closed).
       // Transport-independent: it gates BEFORE any write reaches WordPress.
       await requireWriteAuthority(input.instanceId, "wordpress_post_update");
-      // MCP-only egress (cinatra#1214 S1): update over the plugin's content MCP
-      // server (cinatra-post-update), never a direct /wp/v2/* fetch. The
-      // demote-then-edit gate (status:"draft") is preserved by forwarding the
-      // status field; the plugin applies it and WordPress auto-revisions.
-      return updatePostViaMcp({
+
+      // cinatra#2043 S5 — review-before-publish TRIGGER at the staged content-write
+      // seam. When the host review fence is ON, the PROPOSED content is captured as
+      // an immutable review target and the effect is HELD before it can reach
+      // WordPress; only an approved gate releases the apply. FENCE-OFF / no seam
+      // bound → `{action:"pass"}` with no capture and no extra fetch, so the write
+      // below is byte-identical to pre-S5. Meta-only writes are NOT content review
+      // targets (the MCP content ability does not cover meta) — a write that
+      // carries `meta` still routes through the trigger for its title/content/
+      // excerpt/status fields, and `updatePostViaMcp` fail-closes on meta anyway.
+      const review = await evaluateStagedContentWrite({
+        seam: getWordPressDeps().cmsReview,
+        connectorId: WORDPRESS_CONNECTOR_ID,
+        instanceId: input.instanceId,
+        postId: input.postId,
+        postType: input.postType,
+        proposed: {
+          title: input.title,
+          content: input.content,
+          excerpt: input.excerpt,
+          status: input.status,
+        },
+        fetchCurrent: async (): Promise<CmsCurrentContent> => {
+          const cur = await readPostViaMcp(instance, input.postId, input.postType);
+          return {
+            title: cur.title,
+            content: cur.content,
+            excerpt: cur.excerpt,
+            status: cur.status,
+            adminUrl: cur.adminUrl,
+            ...(cur.link !== undefined ? { link: cur.link } : {}),
+          };
+        },
+      });
+
+      // HELD: the effect is held pending review — the write does NOT reach
+      // WordPress. Return the pending-review descriptor to the caller (the agent
+      // learns the edit is staged, not published).
+      if (review.action === "hold") return review.pending;
+      // REJECTED: a tombstoned effect never writes.
+      if (review.action === "reject") {
+        throw new Error(`wordpress_post_update: ${review.reason}`);
+      }
+
+      // PASS (fence off / org-ungated / nothing to review) or APPLY (an approved
+      // gate released the effect). Either way the write proceeds. MCP-only egress
+      // (cinatra#1214 S1): update over the plugin's content MCP server
+      // (cinatra-post-update), never a direct /wp/v2/* fetch. The demote-then-edit
+      // gate (status:"draft") is preserved by forwarding the status field.
+      const applied = await updatePostViaMcp({
         instance,
         postId: input.postId,
         postType: input.postType,
@@ -614,6 +664,36 @@ export function createWordPressPrimitiveHandlers() {
           meta:    input.meta,
         },
       });
+
+      // APPLY: record the post-apply read-back verification against the STORED
+      // scope manifest (verified / drifted / unmet). Bound only on the
+      // approved-release path — the fence-off pass path returns `applied`
+      // byte-identically below.
+      if (review.action === "apply") {
+        const seam = getWordPressDeps().cmsReview;
+        // INDEPENDENT post-apply RE-READ (a fresh cinatra-post-get, NOT the write
+        // response): the update reply echoes what the write requested, so it
+        // cannot surface a SITE-PLUGIN REWRITE-ON-SAVE. Re-reading the persisted
+        // remote state is what lets the read-back verifier catch an out-of-scope
+        // rewrite as `drifted` (a codex convergence finding).
+        const postApply = await readPostViaMcp(instance, input.postId, input.postType);
+        const readback = seam
+          ? await seam.recordApplyVerification({
+              operationId: review.operationId,
+              gateId: review.gate.gateId,
+              runId: review.gate.runId,
+              postApplyFields: {
+                title: postApply.title,
+                content: postApply.content,
+                excerpt: postApply.excerpt,
+                status: postApply.status,
+              },
+            })
+          : { ok: false, code: "seam-unbound" as const };
+        return { ...applied, review: { operationId: review.operationId, ...readback } };
+      }
+
+      return applied;
     },
 
     // Blocking A2A dispatch to wayflow-wordpress-content-editor.
