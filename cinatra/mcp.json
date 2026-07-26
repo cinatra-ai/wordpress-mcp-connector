@@ -15,6 +15,8 @@
     "wordpress_post_update",
     "wordpress_post_update_meta",
     "wordpress_post_delete",
-    "wordpress_media_upload"
+    "wordpress_media_upload",
+    "wordpress_site_tool_call",
+    "wordpress_site_tools_list"
   ]
 }

@@ -9,6 +9,8 @@ import {
   updateMetaSchema,
   contentEditorRunSchema,
   postUpdateSchema,
+  siteToolCallSchema,
+  siteToolsListSchema,
 } from "./handlers";
 
 const TOOL_META: Record<string, { description: string; inputSchema: z.ZodTypeAny }> = {
@@ -71,6 +73,19 @@ const TOOL_META: Record<string, { description: string; inputSchema: z.ZodTypeAny
     description:
       "Edit a WordPress post using natural language instructions. Dispatches to the wordpress-content-editor WayFlow agent. Note: WordPress lacks a true draft-revision primitive, so when postStatus is 'publish' the agent uses a demote-then-edit pattern via wordpress_post_update with status:draft — the live revision is preserved in WordPress's revision history but the front-of-site copy becomes a draft until re-published. Provide instanceId, postId, instructions. Optional: postType, postStatus. Returns { postId, changes: [{ field, before, after }] } or { result: <text> }.",
     inputSchema: contentEditorRunSchema,
+  },
+  // cinatra#2017 S2 — governed connector-instance invoker (Plane C). Registered
+  // + classified + wired, but DARK in S2 (delegated deny-by-default + no
+  // agent-run allowlist keep them off every live model surface; S7 cuts over).
+  "wordpress_site_tool_call": {
+    description:
+      "Call any tool exposed by a connected WordPress site's own MCP catalog, through the governed connector-instance invoker. Provide toolName (and args matching that tool's schema). instanceId is required only when your session is not pinned to a single site; serverId only when the tool name is ambiguous across the site's enrolled MCP servers.",
+    inputSchema: siteToolCallSchema,
+  },
+  "wordpress_site_tools_list": {
+    description:
+      "List the tools available on a connected WordPress site's own MCP catalog — each with its input schema, annotations, derived class, and policy status — through the governed connector-instance invoker. instanceId is required only when your session is not pinned to a single site; pass cursor to page through large catalogs.",
+    inputSchema: siteToolsListSchema,
   },
 };
 
