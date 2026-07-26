@@ -166,6 +166,60 @@ export const updateMetaSchema = z.object({
   meta: z.record(z.string(), z.unknown()),
 });
 
+// ---------------------------------------------------------------------------
+// Governed connector-instance invoker primitives (cinatra#2017 S2, gateway).
+//
+// `wordpress_site_tool_call` / `wordpress_site_tools_list` are the model-visible,
+// connector-owned entry points to the governed invoker (Plane C): they schema-
+// parse, then call the host invoker capability through the deps slot. They carry
+// NO `connectorKey` and NO `kind` (host-derived from the verified `packageName`,
+// M6) and pass NO actor (host-derived from the MCP request frame, §2.4). They
+// ship DARK in S2 — delegated chat/widget deny-by-default keeps them off those
+// perimeters and they are on no agent-run allowlist; S7 performs the exposure.
+// ---------------------------------------------------------------------------
+
+export const siteToolCallSchema = z.object({
+  toolName: z
+    .string()
+    .min(1)
+    .describe(
+      "The site tool / ability to call. On the default aggregator server this is the inner ability id, which may contain a slash (e.g. \"core/get-site-info\").",
+    ),
+  // Forwarded to the resolved tool's advertised schema UNMODIFIED (§3.7).
+  // Defaults to {} so a no-argument tool is callable without an explicit args.
+  args: z
+    .record(z.string(), z.unknown())
+    .default({})
+    .describe("Arguments for the target tool, matching its advertised input schema. Omit or pass {} for a no-argument tool."),
+  instanceId: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Target connected-site instance. Required only when your session is not pinned to a single site."),
+  serverId: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Target MCP server. Required only when the tool name is ambiguous across the site's enrolled servers."),
+});
+
+export const siteToolsListSchema = z.object({
+  instanceId: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Target connected-site instance. Required only when your session is not pinned to a single site."),
+  serverId: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Restrict the listing to a single MCP server. Optional."),
+  cursor: z
+    .string()
+    .optional()
+    .describe("Pagination cursor from a previous page's nextCursor. Pages are consistent within one catalog revision."),
+});
+
 // Blocking A2A dispatch to wayflow-wordpress-content-editor (port 3021).
 // postId uses z.coerce.number().int().positive() so widget callers (which send
 // String(postId) from buildContentContext) work.
@@ -694,6 +748,56 @@ export function createWordPressPrimitiveHandlers() {
       }
 
       return applied;
+    },
+
+    // cinatra#2017 S2 — governed connector-instance invoker (Plane C). Thin:
+    // schema-parse then forward the NON-IDENTITY coordinates to the host invoker
+    // capability via the deps slot. connectorKey/kind are NOT connector-facing
+    // (host-derived from the verified packageName, M6); the actor is host-derived
+    // from the MCP request frame (§2.4) — the synthetic request.actor literal is
+    // never read here for any decision. Ship-dark: no live model surface reaches
+    // these in S2 (delegated deny-by-default + no agent-run allowlist).
+    "wordpress_site_tool_call": async (request: ExtensionPrimitiveRequest<unknown>) => {
+      const input = siteToolCallSchema.parse(request.input);
+      // FAIL-CLOSED: the invoker is host-bound (register.ts resolves the capability
+      // fail-loud). If the deps slot is skewed/partial and the member is unbound,
+      // DENY descriptively rather than crash — never reach WordPress off-channel.
+      const invoke = getWordPressDeps().invokeSiteTool;
+      if (typeof invoke !== "function") {
+        throw new Error(
+          "wordpress_site_tool_call denied: the governed connector-instance invoker is unavailable " +
+            "(host @cinatra-ai/host:connector-instance-invoker unbound). Refusing to call without the governed channel.",
+        );
+      }
+      // Forward args UNMODIFIED (§3.7); omit absent optionals rather than send an
+      // explicit `undefined` over the capability boundary. NO connectorKey/kind
+      // (host-derived, M6) and NO actor (host-derived from the MCP frame, §2.4).
+      return invoke({
+        toolName: input.toolName,
+        args: input.args,
+        ...(input.instanceId !== undefined ? { instanceId: input.instanceId } : {}),
+        ...(input.serverId !== undefined ? { serverId: input.serverId } : {}),
+      });
+    },
+
+    "wordpress_site_tools_list": async (request: ExtensionPrimitiveRequest<unknown>) => {
+      const input = siteToolsListSchema.parse(request.input);
+      // FAIL-CLOSED (same posture as wordpress_site_tool_call).
+      const list = getWordPressDeps().listSiteTools;
+      if (typeof list !== "function") {
+        throw new Error(
+          "wordpress_site_tools_list denied: the governed connector-instance invoker is unavailable " +
+            "(host @cinatra-ai/host:connector-instance-invoker unbound). Refusing to list without the governed channel.",
+        );
+      }
+      // The host governed list surface runs the pin + live per-instance USE
+      // authority gate BEFORE any catalog read (B2) — an unauthorized list is a
+      // typed error, never a catalog.
+      return list({
+        ...(input.instanceId !== undefined ? { instanceId: input.instanceId } : {}),
+        ...(input.serverId !== undefined ? { serverId: input.serverId } : {}),
+        ...(input.cursor !== undefined ? { cursor: input.cursor } : {}),
+      });
     },
 
     // Blocking A2A dispatch to wayflow-wordpress-content-editor.

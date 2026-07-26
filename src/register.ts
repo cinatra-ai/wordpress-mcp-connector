@@ -39,6 +39,15 @@ import {
   writeWordPressPostPointerWith,
   type WordPressPointerState,
 } from "./integration/pointer-writer-core";
+// cinatra#2017 S2 — VENDORED governed-invoker capability id + structural shape
+// (codex B3). Imported from a LOCAL module, never `@cinatra-ai/sdk-extensions`:
+// the shared typed capability member only lands in the later core PR, so PR-1
+// vendors the pair to compile standalone. The C3 follow-up swaps this for the
+// SDK import once core lands + publishes the contract.
+import {
+  LOCAL_CONNECTOR_INSTANCE_INVOKER_CAP,
+  type LocalConnectorInstanceInvokerShape,
+} from "./mcp/invoker-contract";
 
 const PACKAGE_NAME = "@cinatra-ai/wordpress-mcp-connector";
 
@@ -168,6 +177,12 @@ function buildHostBoundDeps(
   // publish it (an old host) so the writer denies rather than writes unguarded.
   const writeAuthority = () =>
     hostService<HostInstanceWriteAuthorityShape>(ctx, "@cinatra-ai/host:instance-write-authority");
+  // cinatra#2017 S2 — the governed connector-instance invoker (Plane C). Resolved
+  // lazily + FAIL-LOUD via the VENDORED capability id (B3): a host that has not
+  // published it (the destination-first window before the core PR lands) makes the
+  // invoker deps THROW rather than run.
+  const connectorInstanceInvoker = () =>
+    hostService<LocalConnectorInstanceInvokerShape>(ctx, LOCAL_CONNECTOR_INSTANCE_INVOKER_CAP);
   return {
     decodeCursor: (cursor) => pagination().decodeCursor(cursor),
     buildListPage: <T,>(items: T[], total: number, offset: number, limit: number) =>
@@ -239,6 +254,14 @@ function buildHostBoundDeps(
     // never caller-supplied.
     requireInstanceWriteAuthority: async (input) =>
       writeAuthority().selectForConnector("wordpress").requireWrite(input),
+    // cinatra#2017 S2 — governed connector-instance invoker (Plane C). The host
+    // capability derives connectorKey from THIS connector's verified packageName
+    // (M6) and the actor from the MCP request frame (§2.4); the connector forwards
+    // only the non-identity coordinates. `async` so an unresolved-capability throw
+    // from connectorInstanceInvoker() surfaces as a rejected promise the awaiting
+    // handler denies on (fail-closed) — identical posture to the #409 gate above.
+    invokeSiteTool: async (input) => connectorInstanceInvoker().invokeSiteTool(input),
+    listSiteTools: async (input) => connectorInstanceInvoker().listSiteTools(input),
     // cinatra#2043 S5 — the CMS content-review seam. Always constructed (its
     // members resolve the host capability lazily); `isReviewActive()` degrades to
     // false when the host does not publish `@cinatra-ai/host:cms-review`, so a

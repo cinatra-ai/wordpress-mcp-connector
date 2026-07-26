@@ -19,6 +19,12 @@
 //                                  `deleteWordPressInstanceAction` admin op; the
 //                                  host owns the `@/lib/wordpress-api` edge).
 
+import type {
+  SiteToolCallInput,
+  SiteToolsListInput,
+  SiteToolsListPage,
+} from "./mcp/invoker-contract";
+
 type ListPage<T> = { items: T[]; total: number; nextCursor?: string };
 
 /**
@@ -491,6 +497,44 @@ export interface WordPressConnectorDeps {
   requireInstanceWriteAuthority: (
     input: RequireInstanceWriteAuthorityInput,
   ) => Promise<void>;
+  // ---- governed connector-instance invoker (cinatra#2017 S2; host-bound) ----
+  /**
+   * GOVERNED SITE-TOOL CALL — the connector half of the S2 governed invoker
+   * (Plane C). `wordpress_site_tool_call` forwards its parsed coordinates here;
+   * the host capability (`@cinatra-ai/host:connector-instance-invoker`) runs the
+   * full authz → policy → classify → hook → execute → audit order and returns the
+   * tool's unwrapped result.
+   *
+   * HOST-DERIVED IDENTITY (M6 / R2-B1): this dep carries NO `connectorKey` and NO
+   * `kind` — the host derives `connectorKey` from THIS connector's verified
+   * `packageName` inside the published capability, and derives the trusted actor
+   * from the active MCP request frame. The connector passes only the non-identity
+   * coordinates (`toolName`, `args`, optional `instanceId` / `serverId`); it can
+   * neither assert nor select connector identity or caller identity.
+   *
+   * FAIL-CLOSED / SHIP-DARK: bound in `register.ts` by resolving the invoker
+   * capability fail-loud (the identical posture the write-authority gate uses,
+   * register.ts). A host that has not published the invoker (the destination-first
+   * window before the core PR lands) makes this dep THROW on call rather than run
+   * — and no live model surface reaches it in S2 anyway (delegated deny-by-default
+   * + no agent-run allowlist), so the primitives stay dark until the S7 cutover.
+   *
+   * OPTIONAL for skew (matching `cmsReview` / `resolveWidgetActor`): a deps binding
+   * that predates this member leaves it UNBOUND. The handler then DENIES with a
+   * descriptive fail-closed error (never calls an ungoverned path) — so an old /
+   * partial binding fails closed rather than crashing opaquely.
+   */
+  invokeSiteTool?: (input: SiteToolCallInput) => Promise<unknown>;
+  /**
+   * GOVERNED CATALOG LISTING — backs `wordpress_site_tools_list`. Same host-derived
+   * identity + fail-closed posture as `invokeSiteTool`. The host runs the SAME pin
+   * + live per-instance USE authority gate BEFORE any catalog read (codex B2), so
+   * an unauthorized list yields a typed error, never a catalog. Returns the frozen
+   * `tools_list` contract page (§3.5 + §10-A2): rows with schema, annotations,
+   * derived class, policy status, cache age, and a revision-pinned cursor. OPTIONAL
+   * for skew (same posture as `invokeSiteTool`).
+   */
+  listSiteTools?: (input: SiteToolsListInput) => Promise<SiteToolsListPage>;
   // ---- S5 CMS content-review seam (cinatra#2043; host-bound; OPTIONAL) ----
   /**
    * The S5 review-before-publish seam (see `CmsReviewSeam`). OPTIONAL: unbound on
