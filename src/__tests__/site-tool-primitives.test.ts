@@ -35,7 +35,7 @@ import {
 // ---------------------------------------------------------------------------
 // Handler behavior — mocked invoker capability on the deps slot.
 // ---------------------------------------------------------------------------
-const invokeSiteToolMock = vi.fn(async (_input: unknown) => ({ ok: true }));
+const invokeSiteToolMock = vi.fn(async (_input: unknown): Promise<unknown> => ({ ok: true }));
 const listSiteToolsMock = vi.fn(
   async (_input: unknown): Promise<SiteToolsListPage> => ({ tools: [], catalogRevision: "rev-1" }),
 );
