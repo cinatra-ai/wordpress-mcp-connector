@@ -28,6 +28,9 @@ import {
   registerWordPressConnector,
   type WordPressConnectorDeps,
   type CmsReviewSeam,
+  type NativeReadInjectionMode,
+  type NativeReadInjectionPolicyView,
+  type NativeReadInjectionExplain,
 } from "./deps";
 import {
   createWordPressClient,
@@ -67,6 +70,14 @@ type HostWordPressMcpShape = {
   deleteInstance: WordPressConnectorDeps["deleteInstance"];
   // Connection/instance-admin read (cinatra#172 Stage H3).
   getAPIStatus: WordPressConnectorDeps["getApiStatus"];
+  // Trusted-site native read-injection surface (cinatra#2019). OPTIONAL on the
+  // host publication — a Cinatra version that predates it omits these members;
+  // the deps bindings below check for each at call time and degrade to null
+  // (reads/preview) / fail loud (setter) so the connector never crashes on an
+  // older host and the settings card renders the feature as unavailable.
+  readNativeInjectionPolicy?: (instanceId: string) => Promise<NativeReadInjectionPolicyView | null>;
+  setNativeInjectionMode?: (input: { instanceId: string; mode: NativeReadInjectionMode }) => Promise<void>;
+  explainNativeReadInjection?: (input: { instanceId: string }) => Promise<NativeReadInjectionExplain | null>;
 };
 // Post/media content surface (cinatra#172 Stage H3) — the host publishes it
 // under a SEPARATE capability id from the connection-focused wordpress-mcp
@@ -266,6 +277,37 @@ function buildHostBoundDeps(
     // pre-S5 host keeps byte-identical write behavior. Constructing does no
     // resolution and no I/O (probe-safe).
     cmsReview: buildCmsReviewSeam(ctx),
+    // cinatra#2019 trusted-site mode — the per-instance native read-injection
+    // opt-in surface, resolved lazily from the `@cinatra-ai/host:wordpress-mcp`
+    // publication (where the host adds these members alongside the descriptor
+    // set + fingerprint verifier + opt-in store, none of which cross to the
+    // connector). A Cinatra version that predates the surface omits the members:
+    // the reads/preview degrade to null (the settings card renders the feature
+    // as unavailable) and the setter fails loud (it is only ever offered when
+    // the read resolved non-null). Resolving the service does no I/O — every
+    // call resolves it lazily, so activation order never matters.
+    readNativeInjectionPolicy: async (instanceId) => {
+      const svc = wordpressMcp();
+      return typeof svc.readNativeInjectionPolicy === "function"
+        ? svc.readNativeInjectionPolicy(instanceId)
+        : null;
+    },
+    setNativeInjectionMode: async (input) => {
+      const svc = wordpressMcp();
+      if (typeof svc.setNativeInjectionMode !== "function") {
+        throw new Error(
+          `${PACKAGE_NAME}: this Cinatra version does not support trusted-site mode ` +
+            "(native read injection) — update Cinatra to enable it.",
+        );
+      }
+      return svc.setNativeInjectionMode(input);
+    },
+    explainNativeReadInjection: async (input) => {
+      const svc = wordpressMcp();
+      return typeof svc.explainNativeReadInjection === "function"
+        ? svc.explainNativeReadInjection(input)
+        : null;
+    },
   };
 }
 

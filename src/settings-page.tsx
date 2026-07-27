@@ -18,9 +18,50 @@ import { Badge } from "./components/ui/badge";
 // Instance/status reads come from the host-bound deps slot (the extended
 // `@cinatra-ai/host:wordpress-mcp` service) — no `@/lib/wordpress-api` import
 // (cinatra#172 Stage H3).
-import { listInstancesSorted, type WordPressMcpInstance } from "./deps";
+import {
+  getWordPressDeps,
+  listInstancesSorted,
+  type NativeReadInjectionExplain,
+  type NativeReadInjectionPolicyView,
+  type WordPressMcpInstance,
+} from "./deps";
 import { deleteWordPressInstanceAction } from "./setup-actions";
 import { WordPressNangoConnectCard } from "./wordpress-nango-connect-card";
+import { WordPressTrustedSiteCard } from "./wordpress-trusted-site-card";
+
+// Per-instance trusted-site opt-in state resolved server-side for the settings
+// card (cinatra#2019). `policy === null` ⇒ the host does not expose the surface;
+// `explain === null` ⇒ it exposes the opt-in but not the dry-run preview. Reads
+// are best-effort: any error (an older host, or the host-side org-admin gate on
+// the preview) degrades to null so the settings page never crashes.
+type TrustedSiteState = {
+  policy: NativeReadInjectionPolicyView | null;
+  explain: NativeReadInjectionExplain | null;
+};
+
+async function loadTrustedSiteState(
+  instances: WordPressMcpInstance[],
+): Promise<Map<string, TrustedSiteState>> {
+  const deps = getWordPressDeps();
+  const entries = await Promise.all(
+    instances.map(async (instance): Promise<[string, TrustedSiteState]> => {
+      let policy: NativeReadInjectionPolicyView | null = null;
+      let explain: NativeReadInjectionExplain | null = null;
+      try {
+        policy = (await deps.readNativeInjectionPolicy?.(instance.id)) ?? null;
+      } catch {
+        policy = null;
+      }
+      try {
+        explain = (await deps.explainNativeReadInjection?.({ instanceId: instance.id })) ?? null;
+      } catch {
+        explain = null;
+      }
+      return [instance.id, { policy, explain }];
+    }),
+  );
+  return new Map(entries);
+}
 
 // Nango frontend config + connection-service status are read from the injected
 // host port `ctx.nango.*` (host-port inversion), so the connector carries no
@@ -34,6 +75,7 @@ export async function WordPressSettingsPage(props: {
   const instances = listInstancesSorted();
   const nangoFrontendConfig = (await ctx.nango.getFrontendConfig?.()) ?? {};
   const nangoStatus = (await ctx.nango.getStatus?.()) ?? { status: "not_connected" as const };
+  const trustedSite = await loadTrustedSiteState(instances);
 
   return (
     // Standard connector-setup PAGE chrome. This is a MULTI connection
@@ -103,7 +145,7 @@ export async function WordPressSettingsPage(props: {
             at the Wide column like Setup — the Narrow width is for Help and
             other custom config tabs (codex convergence, PR #70). */}
         <TabsContent value="connections" forceMount className="mt-6 w-full data-[state=inactive]:hidden">
-          <WordPressConnectionsSection instances={instances} />
+          <WordPressConnectionsSection instances={instances} trustedSite={trustedSite} />
         </TabsContent>
 
         {/* Help — reserved, always LAST, read-only (no form, no Save): the
@@ -142,7 +184,13 @@ export async function WordPressSettingsPage(props: {
   );
 }
 
-function WordPressConnectionsSection({ instances }: { instances: WordPressMcpInstance[] }) {
+function WordPressConnectionsSection({
+  instances,
+  trustedSite,
+}: {
+  instances: WordPressMcpInstance[];
+  trustedSite: Map<string, TrustedSiteState>;
+}) {
   return (
     // Card-less tab frame (§II "the form is never wrapped in its own card");
     // each connection keeps its own stacked record card.
@@ -188,6 +236,12 @@ function WordPressConnectionsSection({ instances }: { instances: WordPressMcpIns
                   </form>
                 </div>
               </div>
+              <WordPressTrustedSiteCard
+                instanceId={instance.id}
+                instanceName={instance.name}
+                policy={trustedSite.get(instance.id)?.policy ?? null}
+                explain={trustedSite.get(instance.id)?.explain ?? null}
+              />
             </article>
           ))}
         </div>
