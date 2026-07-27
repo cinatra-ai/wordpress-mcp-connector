@@ -23,7 +23,7 @@ import type {
   SiteToolCallInput,
   SiteToolsListInput,
   SiteToolsListPage,
-} from "./mcp/invoker-contract";
+} from "@cinatra-ai/sdk-extensions";
 
 type ListPage<T> = { items: T[]; total: number; nextCursor?: string };
 
