@@ -39,15 +39,14 @@ import {
   writeWordPressPostPointerWith,
   type WordPressPointerState,
 } from "./integration/pointer-writer-core";
-// cinatra#2017 S2 — VENDORED governed-invoker capability id + structural shape
-// (codex B3). Imported from a LOCAL module, never `@cinatra-ai/sdk-extensions`:
-// the shared typed capability member only lands in the later core PR, so PR-1
-// vendors the pair to compile standalone. The C3 follow-up swaps this for the
-// SDK import once core lands + publishes the contract.
-import {
-  LOCAL_CONNECTOR_INSTANCE_INVOKER_CAP,
-  type LocalConnectorInstanceInvokerShape,
-} from "./mcp/invoker-contract";
+// cinatra#2017 S2 — the governed connector-instance invoker host-capability
+// contract, now consumed from the shared `@cinatra-ai/sdk-extensions` surface:
+// the core PR that ships + publishes the invoker has landed, so the connector
+// drops its vendored mirror and types against the canonical contract. The
+// capability id stays an inlined string literal (the SDK keeps the id
+// host-fenced; an extension inlines the literal), matching how every other host
+// capability is resolved in this file.
+import type { HostConnectorInstanceInvokerService } from "@cinatra-ai/sdk-extensions";
 
 const PACKAGE_NAME = "@cinatra-ai/wordpress-mcp-connector";
 
@@ -178,11 +177,10 @@ function buildHostBoundDeps(
   const writeAuthority = () =>
     hostService<HostInstanceWriteAuthorityShape>(ctx, "@cinatra-ai/host:instance-write-authority");
   // cinatra#2017 S2 — the governed connector-instance invoker (Plane C). Resolved
-  // lazily + FAIL-LOUD via the VENDORED capability id (B3): a host that has not
-  // published it (the destination-first window before the core PR lands) makes the
+  // lazily + FAIL-LOUD: a host that has not published the capability makes the
   // invoker deps THROW rather than run.
   const connectorInstanceInvoker = () =>
-    hostService<LocalConnectorInstanceInvokerShape>(ctx, LOCAL_CONNECTOR_INSTANCE_INVOKER_CAP);
+    hostService<HostConnectorInstanceInvokerService>(ctx, "@cinatra-ai/host:connector-instance-invoker");
   return {
     decodeCursor: (cursor) => pagination().decodeCursor(cursor),
     buildListPage: <T,>(items: T[], total: number, offset: number, limit: number) =>

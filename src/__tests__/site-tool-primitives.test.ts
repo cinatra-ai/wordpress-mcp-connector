@@ -8,12 +8,12 @@
 //     an injected connectorKey/kind is stripped by the schema, never forwarded;
 //   • no actor is read from tool input (§2.4) — identity is host-derived;
 //   • args are forwarded UNMODIFIED (§3.7);
-//   • fail-loud when the invoker capability is unbound (destination-first window);
-//   • the connector compiles against a VENDORED local structural type + capability-id
-//     constant, importing NO new @cinatra-ai/sdk-extensions symbol (codex B3);
-//   • the vendored tools_list row carries the schema-bearing fields (§10-A2) and an
+//   • fail-loud when the invoker capability is unbound;
+//   • the connector types the invoker against the shared @cinatra-ai/sdk-extensions
+//     contract (cinatra#2017 S2, C3 swap) and inlines the host-fenced capability id;
+//   • the tools_list row carries the schema-bearing fields (§10-A2) and an
 //     OPAQUE host-owned serverId (§10-A1).
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 import { createWordPressPrimitiveHandlers } from "@cinatra-ai/wordpress-mcp-connector/mcp-handlers";
@@ -25,12 +25,16 @@ import {
   type WordPressConnectorDeps,
 } from "../deps";
 import { register } from "../register";
-import {
-  LOCAL_CONNECTOR_INSTANCE_INVOKER_CAP,
-  type LocalConnectorInstanceInvokerShape,
-  type SiteToolRow,
-  type SiteToolsListPage,
-} from "../mcp/invoker-contract";
+import type {
+  HostConnectorInstanceInvokerService,
+  SiteToolRow,
+  SiteToolsListPage,
+} from "@cinatra-ai/sdk-extensions";
+
+// The governed-invoker capability id. The SDK keeps the id host-fenced (an
+// extension inlines the literal), so register.ts inlines it directly; these
+// tests mirror that same literal.
+const CONNECTOR_INSTANCE_INVOKER_CAP = "@cinatra-ai/host:connector-instance-invoker";
 
 // ---------------------------------------------------------------------------
 // Handler behavior — mocked invoker capability on the deps slot.
@@ -275,11 +279,11 @@ describe("register(ctx) — governed-invoker capability binding (cinatra#2017 S2
     _resetWordPressDepsForTests();
   });
 
-  it("binds invokeSiteTool / listSiteTools against the vendored capability id and forwards VERBATIM (no connectorKey/kind added)", async () => {
+  it("binds invokeSiteTool / listSiteTools against the governed capability id and forwards VERBATIM (no connectorKey/kind added)", async () => {
     const invokeSiteTool = vi.fn(async () => ({ done: true }));
     const listSiteTools = vi.fn(async () => ({ tools: [], catalogRevision: "r" }));
     const { resolveProviders } = activateWithServices({
-      [LOCAL_CONNECTOR_INSTANCE_INVOKER_CAP]: { invokeSiteTool, listSiteTools },
+      [CONNECTOR_INSTANCE_INVOKER_CAP]: { invokeSiteTool, listSiteTools },
     });
     // Probe-safe: no resolution happened at registration.
     expect(resolveProviders).not.toHaveBeenCalled();
@@ -307,17 +311,18 @@ describe("register(ctx) — governed-invoker capability binding (cinatra#2017 S2
 });
 
 // ---------------------------------------------------------------------------
-// Vendored contract (codex B3 + §10-A1/A2) — the connector compiles standalone.
+// SDK invoker contract (cinatra#2017 S2, C3 swap + §10-A1/A2) — the connector
+// consumes the shared @cinatra-ai/sdk-extensions surface.
 // ---------------------------------------------------------------------------
-describe("vendored invoker contract (B3) — no unreleased SDK symbol", () => {
-  it("pins the capability-id constant to the design literal", () => {
-    expect(LOCAL_CONNECTOR_INSTANCE_INVOKER_CAP).toBe("@cinatra-ai/host:connector-instance-invoker");
+describe("SDK invoker contract (cinatra#2017 S2, C3) — shared @cinatra-ai/sdk-extensions surface", () => {
+  it("pins the inlined capability-id literal to the design literal", () => {
+    expect(CONNECTOR_INSTANCE_INVOKER_CAP).toBe("@cinatra-ai/host:connector-instance-invoker");
   });
 
-  it("the vendored shape is structurally usable (compile + runtime construction)", async () => {
-    // A conforming impl assigns to the vendored structural type — the proof that
-    // the connector types the capability itself, not via the SDK.
-    const impl: LocalConnectorInstanceInvokerShape = {
+  it("the shared invoker shape is structurally usable (compile + runtime construction)", async () => {
+    // A conforming impl assigns to the shared SDK type — the proof that the
+    // connector types the capability against the canonical published contract.
+    const impl: HostConnectorInstanceInvokerService = {
       invokeSiteTool: async () => ({ ok: true }),
       listSiteTools: async () => ({ tools: [], catalogRevision: "r" }),
     };
@@ -329,7 +334,7 @@ describe("vendored invoker contract (B3) — no unreleased SDK symbol", () => {
     // §10-A2: inputSchema (required) + outputSchema? + label? + description? are
     // part of the frozen row. §10-A1: serverId is the host-owned opaque constant
     // "mcp-adapter-default" — never endpoint-derived; the connector treats it as an
-    // opaque string. This constructs a fully-populated row against the vendored type.
+    // opaque string. This constructs a fully-populated row against the shared SDK type.
     const row: SiteToolRow = {
       name: "ewpa/create-post",
       serverId: "mcp-adapter-default",
@@ -348,44 +353,30 @@ describe("vendored invoker contract (B3) — no unreleased SDK symbol", () => {
     expect(row).toMatchObject({ outputSchema: expect.anything(), label: "Create post", description: expect.anything() });
   });
 
-  // Static guard — the vendored pair is LOCAL; NO source file imports the new
-  // invoker symbol from @cinatra-ai/sdk-extensions (a build-time break before the
-  // core PR publishes it, codex B3).
-  describe("static: the invoker contract is vendored, never imported from the SDK", () => {
+  // Static guard — the C3 swap: core landed + published the contract, so the
+  // connector now CONSUMES it from @cinatra-ai/sdk-extensions. The vendored mirror
+  // is gone; the capability id stays an inlined literal (the SDK keeps the id
+  // host-fenced — an extension inlines it, never imports the constant).
+  describe("static: the invoker contract is consumed from the SDK (C3 swap)", () => {
     const read = (rel: string) => readFileSync(new URL(rel, import.meta.url), "utf8");
-    const contract = read("../mcp/invoker-contract.ts");
     const registerSrc = read("../register.ts");
     const depsSrc = read("../deps.ts");
-    const handlersSrc = read("../mcp/handlers.ts");
 
-    // Every `import ... from "@cinatra-ai/sdk-extensions"` line across the wiring
-    // files — the invoker symbols must appear in NONE of them.
-    // Only REAL import statements (line begins with `import`) — a doc comment
-    // that names the SDK to explain why it is NOT imported is not an import.
-    const sdkImportLines = [registerSrc, depsSrc, handlersSrc, contract]
-      .join("\n")
-      .split("\n")
-      .filter((l) => /^\s*import\b/.test(l) && l.includes("@cinatra-ai/sdk-extensions"));
-
-    it("no @cinatra-ai/sdk-extensions import references the invoker cap / shape / row types", () => {
-      for (const line of sdkImportLines) {
-        expect(line).not.toMatch(/connectorInstanceInvoker|ConnectorInstanceInvoker|SiteTool|InvokerContract|LOCAL_CONNECTOR_INSTANCE_INVOKER_CAP/);
-      }
+    it("the vendored invoker-contract module is deleted", () => {
+      expect(existsSync(new URL("../mcp/invoker-contract.ts", import.meta.url))).toBe(false);
     });
 
-    it("invoker-contract.ts is fully self-contained (no IMPORT from the SDK; comments may name it)", () => {
-      const contractImportsFromSdk = contract
-        .split("\n")
-        .filter((l) => /^\s*import\b/.test(l) && l.includes("@cinatra-ai/sdk-extensions"));
-      expect(contractImportsFromSdk).toEqual([]);
+    it("register.ts types the invoker against the SDK contract, inlines the cap id, and drops the vendored module", () => {
+      expect(registerSrc).toContain("from \"@cinatra-ai/sdk-extensions\"");
+      expect(registerSrc).toContain("HostConnectorInstanceInvokerService");
+      expect(registerSrc).toContain("\"@cinatra-ai/host:connector-instance-invoker\"");
+      expect(registerSrc).not.toContain("./mcp/invoker-contract");
     });
 
-    it("register.ts resolves the cap from the LOCAL vendored module, not the SDK", () => {
-      expect(registerSrc).toMatch(/LOCAL_CONNECTOR_INSTANCE_INVOKER_CAP[\s\S]*from\s+"\.\/mcp\/invoker-contract"/);
-    });
-
-    it("defines the vendored capability-id literal locally", () => {
-      expect(contract).toContain("\"@cinatra-ai/host:connector-instance-invoker\"");
+    it("deps.ts imports the invoker input/output types from the SDK, not the vendored module", () => {
+      expect(depsSrc).toContain("from \"@cinatra-ai/sdk-extensions\"");
+      expect(depsSrc).toContain("SiteToolCallInput");
+      expect(depsSrc).not.toContain("./mcp/invoker-contract");
     });
   });
 });
