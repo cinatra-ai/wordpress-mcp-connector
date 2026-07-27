@@ -18,16 +18,22 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionHostContext } from "@cinatra-ai/sdk-extensions";
 
-const { listInstancesSorted } = vi.hoisted(() => ({
+const { listInstancesSorted, getWordPressDeps } = vi.hoisted(() => ({
   listInstancesSorted: vi.fn(),
+  // Empty deps: the trusted-site optional members are absent, so the settings
+  // page's per-instance state resolves null (feature unavailable) — the stubbed
+  // card below ignores it anyway, keeping this test scoped to the tab contract.
+  getWordPressDeps: vi.fn(() => ({})),
 }));
 
 vi.mock("../deps", () => ({
   listInstancesSorted,
+  getWordPressDeps,
 }));
 
 vi.mock("../setup-actions", () => ({
   deleteWordPressInstanceAction: vi.fn(),
+  setWordPressTrustedSiteModeAction: vi.fn(),
 }));
 
 // The connect-card's own behaviour (Nango session, toast-on-error, …) is
@@ -36,6 +42,15 @@ vi.mock("../setup-actions", () => ({
 vi.mock("../wordpress-nango-connect-card", () => ({
   WordPressNangoConnectCard: () => (
     <div data-testid="connect-card-stub">Connect site</div>
+  ),
+}));
+
+// The trusted-site card (cinatra#2019) has its own test file
+// (wordpress-trusted-site-card.test.tsx); stub it here so this test stays scoped
+// to the tab structure/content-mapping/a11y contract.
+vi.mock("../wordpress-trusted-site-card", () => ({
+  WordPressTrustedSiteCard: () => (
+    <div data-testid="trusted-site-card-stub">Trusted-site mode</div>
   ),
 }));
 

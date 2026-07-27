@@ -343,6 +343,55 @@ export type CmsReviewSeam = {
   recordApplyVerification: (input: CmsReviewReadbackInput) => Promise<CmsReviewReadbackResult>;
 };
 
+// ---------------------------------------------------------------------------
+// Trusted-site mode — per-instance native read-injection opt-in (cinatra#2019).
+//
+// Trusted-site mode is the per-instance, default-OFF opt-in that lets the small
+// descriptor-verified TRUSTED-READ set of a connected site reach the model
+// provider through NATIVE injection (the provider calls those reads by name at
+// runtime) instead of only through Cinatra's governed invoker. It is a strict
+// SUBTRACTIVE eligibility computation that never denies or hides a governed
+// tool; writes always stay on the governed path.
+//
+// The policy read/write + the dry-run preview are HOST-computed and published on
+// the `@cinatra-ai/host:wordpress-mcp` service (the descriptor set, the
+// fingerprint verifier, and the opt-in store all live host-side and never cross
+// to the connector). The three members below are the connector's view of that
+// surface; they are OPTIONAL for skew (a host — or a deps binding — that predates
+// the surface leaves them unbound / resolves null) so the settings card renders
+// the feature as unavailable rather than crashing, exactly like `invokeSiteTool`.
+// ---------------------------------------------------------------------------
+
+/** Per-instance trusted-site opt-in mode. `off` (also the absent-row default)
+ * injects nothing; `trusted_site` opts the instance into native injection of the
+ * descriptor-verified trusted-read set. */
+export type NativeReadInjectionMode = "off" | "trusted_site";
+
+/** The settings card's view of an instance's opt-in state. `consentStale` is
+ * true when the row is `trusted_site` but the acknowledged disclosure / descriptor
+ * set no longer matches what the host currently ships — the card then requires a
+ * fresh acknowledgement before injection can resume (nothing injects while
+ * stale). */
+export type NativeReadInjectionPolicyView = {
+  mode: NativeReadInjectionMode;
+  consentStale?: boolean;
+};
+
+/** One wire-tool the verifier rejected, with a stable machine reason — surfaced
+ * so an empty verified set is explainable to the admin. */
+export type NativeReadInjectionEjection = { name: string; reason: string };
+
+/** Dry-run preview of the trusted-read set for an instance against its CURRENT
+ * advertised catalog. Carries no credentials and has no side effects (no audit);
+ * used only to render the settings card's live preview. */
+export type NativeReadInjectionExplain = {
+  mode: NativeReadInjectionMode;
+  consentStale: boolean;
+  /** Wire-tool names that currently pass every verification conjunct. */
+  verifiedNames: string[];
+  ejected: NativeReadInjectionEjection[];
+};
+
 export interface WordPressConnectorDeps {
   decodeCursor: (cursor?: string) => number;
   buildListPage: <T>(items: T[], total: number, offset: number, limit: number) => ListPage<T>;
@@ -547,6 +596,30 @@ export interface WordPressConnectorDeps {
    * non-identity write coordinates.
    */
   cmsReview?: CmsReviewSeam;
+  // ---- trusted-site native read-injection opt-in (cinatra#2019; host-bound; OPTIONAL) ----
+  /**
+   * Read the per-instance trusted-site opt-in state. Resolves `null` when the
+   * host publication does not expose the trusted-site surface (a Cinatra version
+   * that predates it) — the settings card then renders the feature as
+   * unavailable. On a supporting host an absent row resolves `{mode:"off"}`.
+   * OPTIONAL for skew (a deps binding that predates this member leaves it unbound).
+   */
+  readNativeInjectionPolicy?: (instanceId: string) => Promise<NativeReadInjectionPolicyView | null>;
+  /**
+   * Set the per-instance trusted-site opt-in mode. The caller chooses ONLY the
+   * mode — the host stamps the acknowledged disclosure + descriptor-set version
+   * from its OWN shipped constants at write time, so a connector or UI can never
+   * assert or forge the acknowledged content. Org-admin-gated host-side (throws
+   * on deny). OPTIONAL for skew.
+   */
+  setNativeInjectionMode?: (input: { instanceId: string; mode: NativeReadInjectionMode }) => Promise<void>;
+  /**
+   * Org-admin-gated DRY-RUN preview of the trusted-read set for an instance (no
+   * credentials, no side effects, no audit) — the settings card's live-preview
+   * source. Resolves `null` when the host does not expose the preview (an older
+   * host); the card then states the preview is unavailable. OPTIONAL for skew.
+   */
+  explainNativeReadInjection?: (input: { instanceId: string }) => Promise<NativeReadInjectionExplain | null>;
 }
 
 const WORDPRESS_DEPS_KEY = Symbol.for("@cinatra-ai/wordpress-mcp-connector:host-deps/v1");
