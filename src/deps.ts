@@ -392,6 +392,32 @@ export type NativeReadInjectionExplain = {
   ejected: NativeReadInjectionEjection[];
 };
 
+/** The host surface an external-MCP toolbox build is being assembled for —
+ * structurally identical to the SDK `ExtensionToolboxBuildContext["surface"]`
+ * union (cinatra#2019 S4). Only `"chat"` may ever emit native injection; the
+ * host member re-refuses every other value independently of the toolbox's own
+ * short-circuit (dual-layer surface enforcement). */
+export type NativeReadInjectionSurface = "chat" | "agent_run" | "public_site_widget" | "session";
+
+/** Input of {@link WordPressConnectorDeps.buildNativeReadInjection}. Carries
+ * ONLY the non-identity coordinates — the host derives the trusted actor from
+ * its ambient stores and the connector key from this connector's verified
+ * package identity, never from these arguments. */
+export type NativeReadInjectionBuildInput = {
+  instanceId: string;
+  surface: NativeReadInjectionSurface;
+};
+
+/** A host-verified native read-injection grant for one instance. By contract
+ * `allowedTools` is a NON-EMPTY list of exact wire-tool names (the host returns
+ * `null` instead of an empty grant, so an entry with a null/empty allowlist is
+ * unrepresentable end-to-end) and `serverId` names the enrolled catalog server
+ * the names were verified against (v1: always the default adapter server). */
+export type NativeReadInjectionBuildResult = {
+  serverId: string;
+  allowedTools: string[];
+};
+
 export interface WordPressConnectorDeps {
   decodeCursor: (cursor?: string) => number;
   buildListPage: <T>(items: T[], total: number, offset: number, limit: number) => ListPage<T>;
@@ -620,6 +646,29 @@ export interface WordPressConnectorDeps {
    * host); the card then states the preview is unavailable. OPTIONAL for skew.
    */
   explainNativeReadInjection?: (input: { instanceId: string }) => Promise<NativeReadInjectionExplain | null>;
+  /**
+   * HOST-COMPUTED native read-injection decision for ONE instance — the S4
+   * trusted-site-mode gate the external-MCP toolbox consults per surviving
+   * instance (cinatra#2019). The host owns the entire trust computation:
+   * per-instance opt-in row (+ consent-stamp exactness), ambient-actor USE
+   * authority, the post-enrollment catalog snapshots, the duplicate-anywhere
+   * rule, and descriptor/fingerprint verification. None of that state crosses
+   * to the connector — the member resolves to a grant (`{serverId,
+   * allowedTools}`) or `null`, and `null` ALWAYS means "emit nothing for this
+   * instance" (mode off, consent stale, refused surface, unverifiable catalog,
+   * or an empty verified set alike — the connector never learns which; the
+   * settings card's preview uses `explainNativeReadInjection` for that).
+   *
+   * FAIL-CLOSED / SKEW: OPTIONAL — unbound (a deps binding that predates this
+   * member) or resolving `null` on a host that predates the surface both leave
+   * the toolbox emitting nothing (M1 stays the only path). The host member
+   * additionally re-refuses any `surface !== "chat"` independently of the
+   * toolbox's own short-circuit, so a single-layer bug cannot widen the
+   * surface matrix.
+   */
+  buildNativeReadInjection?: (
+    input: NativeReadInjectionBuildInput,
+  ) => Promise<NativeReadInjectionBuildResult | null>;
 }
 
 const WORDPRESS_DEPS_KEY = Symbol.for("@cinatra-ai/wordpress-mcp-connector:host-deps/v1");
