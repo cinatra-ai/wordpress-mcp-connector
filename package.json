@@ -5,7 +5,6 @@
   "type": "module",
   "files": [
     "cinatra",
-    "skills",
     "src",
     "!src/__tests__"
   ],
@@ -71,11 +70,19 @@
       "capabilities",
       "settings"
     ],
-    "dependencies": [],
+    "dependencies": [
+      {
+        "packageName": "@cinatra-ai/wordpress-widget-chat-skill",
+        "edgeType": "runtime",
+        "versionConstraint": {
+          "kind": "semver-range",
+          "range": "*"
+        },
+        "requirement": "required",
+        "kind": "skill"
+      }
+    ],
     "sdkAbiRange": "^2",
-    "capabilities": {
-      "widget-chat.wordpress-content-editor": "wordpress-widget-chat"
-    },
     "webhooks": {
       "hooks": [
         {

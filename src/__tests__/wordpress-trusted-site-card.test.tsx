@@ -109,7 +109,10 @@ describe("WordPressTrustedSiteCard — default-off + disclosure ceremony", () =>
     expect(disclosure!.textContent).toContain(`disclosure ${TRUSTED_SITE_DISCLOSURE_V1.version}`);
     // The full versioned copy — including the credential-sharing sentence — is shown.
     expect(disclosure!.textContent).toContain(TRUSTED_SITE_DISCLOSURE_V1.text);
-    expect(disclosure!.textContent).toMatch(/Application Password.*shared with the provider/s);
+    // `[\s\S]*` rather than `.*` + the `s` flag: the cinatra host typechecks this
+    // repo's sources against its own ES2017 target, where the dotAll flag is a
+    // TS1501 error. The two forms are equivalent here.
+    expect(disclosure!.textContent).toMatch(/Application Password[\s\S]*shared with the provider/);
 
     // Confirming submits the opt-in as trusted_site for THIS instance — the card
     // sends only the mode (the host stamps the acknowledged version/hash).
