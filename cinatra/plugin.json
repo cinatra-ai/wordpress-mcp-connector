@@ -1,9 +1,0 @@
-{
-  "id": "@cinatra-ai/wordpress-mcp-connector",
-  "name": "WordPress Connector",
-  "description": "Skills for the Cinatra WordPress connector.",
-  "skills": {
-    "type": "system",
-    "path": "../skills"
-  }
-}

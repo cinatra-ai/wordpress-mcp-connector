@@ -112,4 +112,4 @@ The filter uses strict equality on `""` so `null`, `false`, and `0` pass through
 - Security: `instanceId` and `postId` are **forcibly overridden** from the server-trusted request context inside `execute()` — any LLM-supplied identity values are dropped. The tool schema only exposes `instructions`.
 - Calls `wordpress_content_editor_run` in-process (not via MCP network round-trip).
 
-Skills for widget routing live in `packages/connector-wordpress/skills/wordpress-widget-chat/SKILL.md` (skill ID: `@cinatra/connector-wordpress:wordpress-widget-chat`).
+The widget-routing skill lives in the `@cinatra-ai/wordpress-widget-chat-skill` extension at `extensions/cinatra-ai/wordpress-widget-chat-skill/skills/wordpress-widget-chat/SKILL.md` (skill id: `@cinatra-ai/wordpress-widget-chat-skill:wordpress-widget-chat`). This connector reaches it through the declared runtime dependency edge in `package.json`; it ships no bundle of its own, and `cinatra.widgetStream.skillCapability` names the `widget-chat.wordpress-content-editor` capability that the skill package provides.
