@@ -31,6 +31,8 @@ import {
   type NativeReadInjectionMode,
   type NativeReadInjectionPolicyView,
   type NativeReadInjectionExplain,
+  type NativeReadInjectionBuildInput,
+  type NativeReadInjectionBuildResult,
 } from "./deps";
 import {
   createWordPressClient,
@@ -78,6 +80,7 @@ type HostWordPressMcpShape = {
   readNativeInjectionPolicy?: (instanceId: string) => Promise<NativeReadInjectionPolicyView | null>;
   setNativeInjectionMode?: (input: { instanceId: string; mode: NativeReadInjectionMode }) => Promise<void>;
   explainNativeReadInjection?: (input: { instanceId: string }) => Promise<NativeReadInjectionExplain | null>;
+  buildNativeReadInjection?: (input: NativeReadInjectionBuildInput) => Promise<NativeReadInjectionBuildResult | null>;
 };
 // Post/media content surface (cinatra#172 Stage H3) — the host publishes it
 // under a SEPARATE capability id from the connection-focused wordpress-mcp
@@ -306,6 +309,17 @@ function buildHostBoundDeps(
       const svc = wordpressMcp();
       return typeof svc.explainNativeReadInjection === "function"
         ? svc.explainNativeReadInjection(input)
+        : null;
+    },
+    // The per-instance native read-injection DECISION (the S4 toolbox gate).
+    // Same skew posture as the reads above: a host that predates the surface
+    // resolves `null`, which the toolbox treats as "emit nothing for this
+    // instance" — the external-MCP toolbox stays dark on an older Cinatra
+    // rather than throwing (fail-closed, the `invokeSiteTool` precedent).
+    buildNativeReadInjection: async (input) => {
+      const svc = wordpressMcp();
+      return typeof svc.buildNativeReadInjection === "function"
+        ? svc.buildNativeReadInjection(input)
         : null;
     },
   };

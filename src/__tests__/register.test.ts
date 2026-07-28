@@ -197,6 +197,46 @@ describe("register(ctx) — transport-DI deps binding (Stage 3)", () => {
     expect(listInstancesSorted().map((i) => i.id)).toEqual(["new", "mid", "old"]);
   });
 
+  it("buildNativeReadInjection degrades to null when the wordpress-mcp service predates the S4 member — and forwards verbatim when it exists (cinatra#2019 skew)", async () => {
+    // The connector's own register(ctx) ALWAYS binds a lazy wrapper for this
+    // dep, so on a post-cutover host that merely predates the HOST-side
+    // member the toolbox's per-instance decision resolves null (zero
+    // emission) rather than throwing — the invokeSiteTool skew posture.
+    activateWithServices({
+      "@cinatra-ai/host:wordpress-mcp": {
+        listInstances: vi.fn(() => []),
+        probeAdapter: vi.fn(),
+        resolveServerUrl: vi.fn(),
+        isPrivateUrl: vi.fn(),
+        deleteInstance: vi.fn(),
+        getAPIStatus: vi.fn(),
+        // NO buildNativeReadInjection member (a pre-S4 Cinatra).
+      },
+    });
+    await expect(
+      getWordPressDeps().buildNativeReadInjection?.({ instanceId: "wp-1", surface: "chat" }),
+    ).resolves.toBeNull();
+
+    // With the member published, input and result pass through verbatim.
+    const grant = { serverId: "mcp-adapter-default", allowedTools: ["ewpa-get-post"] };
+    const buildNativeReadInjection = vi.fn(async () => grant);
+    activateWithServices({
+      "@cinatra-ai/host:wordpress-mcp": {
+        listInstances: vi.fn(() => []),
+        probeAdapter: vi.fn(),
+        resolveServerUrl: vi.fn(),
+        isPrivateUrl: vi.fn(),
+        deleteInstance: vi.fn(),
+        getAPIStatus: vi.fn(),
+        buildNativeReadInjection,
+      },
+    });
+    await expect(
+      getWordPressDeps().buildNativeReadInjection?.({ instanceId: "wp-1", surface: "chat" }),
+    ).resolves.toBe(grant);
+    expect(buildNativeReadInjection).toHaveBeenCalledWith({ instanceId: "wp-1", surface: "chat" });
+  });
+
   it("fails LOUD (descriptive) on a missing host service at call time", () => {
     activateWithServices({});
     expect(() => getWordPressDeps().listMcpInstances()).toThrow(
