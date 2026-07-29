@@ -308,6 +308,49 @@ describe("register(ctx) — transport-DI deps binding (Stage 3)", () => {
     ).resolves.toEqual({ status: "unknown", reason: "unparseable" });
   });
 
+  it("resolveConnectedSiteMetadata degrades to unknown/no_inventory even when a PUBLISHED host implementation itself throws or resolves null — the guarantee is enforced at THIS layer, not merely delegated to the caller", async () => {
+    // A host that DOES publish the member but violates its own contract (a
+    // rejected promise, or a contract-violating null/undefined resolve) must
+    // not surface as a rejected promise or a nullish value here — the whole
+    // point of resolving this member centrally is that every caller (the
+    // settings page today, any future consumer) gets the SAME honest
+    // "unknown" guarantee without having to re-implement its own catch/??.
+    activateWithServices({
+      "@cinatra-ai/host:wordpress-mcp": {
+        listInstances: vi.fn(() => []),
+        probeAdapter: vi.fn(),
+        resolveServerUrl: vi.fn(),
+        isPrivateUrl: vi.fn(),
+        deleteInstance: vi.fn(),
+        getAPIStatus: vi.fn(),
+        resolveConnectedSiteMetadata: vi.fn(async () => {
+          throw new Error("simulated host-side failure (e.g. a DB read error)");
+        }),
+      },
+    });
+    await expect(
+      getWordPressDeps().resolveConnectedSiteMetadata?.("wp-1"),
+    ).resolves.toEqual({ status: "unknown", reason: "no_inventory" });
+
+    activateWithServices({
+      "@cinatra-ai/host:wordpress-mcp": {
+        listInstances: vi.fn(() => []),
+        probeAdapter: vi.fn(),
+        resolveServerUrl: vi.fn(),
+        isPrivateUrl: vi.fn(),
+        deleteInstance: vi.fn(),
+        getAPIStatus: vi.fn(),
+        // Contract-violating: a published member that resolves null instead
+        // of a real tri-state (should never happen per the host's own
+        // typing, but the adapter does not TRUST that — it verifies).
+        resolveConnectedSiteMetadata: vi.fn(async () => null as never),
+      },
+    });
+    await expect(
+      getWordPressDeps().resolveConnectedSiteMetadata?.("wp-1"),
+    ).resolves.toEqual({ status: "unknown", reason: "no_inventory" });
+  });
+
   it("fails LOUD (descriptive) on a missing host service at call time", () => {
     activateWithServices({});
     expect(() => getWordPressDeps().listMcpInstances()).toThrow(

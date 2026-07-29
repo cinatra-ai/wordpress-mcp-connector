@@ -339,11 +339,25 @@ function buildHostBoundDeps(
     // freshly-connected site that has "never reported" both render the SAME
     // honest Unknown caution — never nothing, and never collapsed into a
     // false "clear" (the silence-as-safety failure mode D6/D8 rules out).
+    // This guarantee is enforced HERE, not just delegated to the caller: an
+    // absent member, a host implementation that THROWS/rejects, and one that
+    // (incorrectly, contract-violating) resolves `null`/`undefined` all
+    // degrade to the SAME `{status:"unknown", reason:"no_inventory"}` shape —
+    // never a rejected promise, never a nullish value a caller could
+    // `??`-collapse past without noticing.
     resolveConnectedSiteMetadata: async (instanceId) => {
       const svc = wordpressMcp();
-      return typeof svc.resolveConnectedSiteMetadata === "function"
-        ? svc.resolveConnectedSiteMetadata(instanceId)
-        : { status: "unknown", reason: "no_inventory" };
+      if (typeof svc.resolveConnectedSiteMetadata !== "function") {
+        return { status: "unknown", reason: "no_inventory" };
+      }
+      try {
+        return (await svc.resolveConnectedSiteMetadata(instanceId)) ?? {
+          status: "unknown",
+          reason: "no_inventory",
+        };
+      } catch {
+        return { status: "unknown", reason: "no_inventory" };
+      }
     },
   };
 }
