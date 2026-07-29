@@ -33,6 +33,7 @@ import {
   type NativeReadInjectionExplain,
   type NativeReadInjectionBuildInput,
   type NativeReadInjectionBuildResult,
+  type ConnectedSiteMetadata,
 } from "./deps";
 import {
   createWordPressClient,
@@ -81,6 +82,13 @@ type HostWordPressMcpShape = {
   setNativeInjectionMode?: (input: { instanceId: string; mode: NativeReadInjectionMode }) => Promise<void>;
   explainNativeReadInjection?: (input: { instanceId: string }) => Promise<NativeReadInjectionExplain | null>;
   buildNativeReadInjection?: (input: NativeReadInjectionBuildInput) => Promise<NativeReadInjectionBuildResult | null>;
+  // Connected-site metadata (cinatra#2021 S6). OPTIONAL on the host
+  // publication — a Cinatra version that predates it omits this member; the
+  // deps binding below checks for it at call time and degrades to the tri-state's
+  // OWN "unknown" shape (never to null/undefined and never a throw), matching
+  // the D8 contract that "no signal" is always a discriminated, renderable
+  // state, not an absent one.
+  resolveConnectedSiteMetadata?: (instanceId: string) => Promise<ConnectedSiteMetadata>;
 };
 // Post/media content surface (cinatra#172 Stage H3) — the host publishes it
 // under a SEPARATE capability id from the connection-focused wordpress-mcp
@@ -321,6 +329,35 @@ function buildHostBoundDeps(
       return typeof svc.buildNativeReadInjection === "function"
         ? svc.buildNativeReadInjection(input)
         : null;
+    },
+    // Connected-site metadata (cinatra#2021 S6, D8). UNLIKE every sibling
+    // read above, a skewed host (one that predates this member) does NOT
+    // degrade to null/undefined here — it degrades to the tri-state's OWN
+    // "unknown" shape, `{status:"unknown", reason:"no_inventory"}`. This is
+    // the deliberate skew-safety property the least-privilege warning card
+    // depends on: an older Cinatra reporting "I don't have this member" and a
+    // freshly-connected site that has "never reported" both render the SAME
+    // honest Unknown caution — never nothing, and never collapsed into a
+    // false "clear" (the silence-as-safety failure mode D6/D8 rules out).
+    // This guarantee is enforced HERE, not just delegated to the caller: an
+    // absent member, a host implementation that THROWS/rejects, and one that
+    // (incorrectly, contract-violating) resolves `null`/`undefined` all
+    // degrade to the SAME `{status:"unknown", reason:"no_inventory"}` shape —
+    // never a rejected promise, never a nullish value a caller could
+    // `??`-collapse past without noticing.
+    resolveConnectedSiteMetadata: async (instanceId) => {
+      const svc = wordpressMcp();
+      if (typeof svc.resolveConnectedSiteMetadata !== "function") {
+        return { status: "unknown", reason: "no_inventory" };
+      }
+      try {
+        return (await svc.resolveConnectedSiteMetadata(instanceId)) ?? {
+          status: "unknown",
+          reason: "no_inventory",
+        };
+      } catch {
+        return { status: "unknown", reason: "no_inventory" };
+      }
     },
   };
 }

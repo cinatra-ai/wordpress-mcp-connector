@@ -21,6 +21,7 @@ import { Badge } from "./components/ui/badge";
 import {
   getWordPressDeps,
   listInstancesSorted,
+  type ConnectedSiteMetadata,
   type NativeReadInjectionExplain,
   type NativeReadInjectionPolicyView,
   type WordPressMcpInstance,
@@ -28,6 +29,7 @@ import {
 import { deleteWordPressInstanceAction } from "./setup-actions";
 import { WordPressNangoConnectCard } from "./wordpress-nango-connect-card";
 import { WordPressTrustedSiteCard } from "./wordpress-trusted-site-card";
+import { WordPressLeastPrivilegeCard } from "./wordpress-least-privilege-card";
 
 // Per-instance trusted-site opt-in state resolved server-side for the settings
 // card (cinatra#2019). `policy === null` ⇒ the host does not expose the surface;
@@ -63,6 +65,33 @@ async function loadTrustedSiteState(
   return new Map(entries);
 }
 
+// Per-instance connected-site metadata resolved server-side for the
+// least-privilege warning card (cinatra#2021 S6). UNLIKE `loadTrustedSiteState`
+// above, this never resolves to a null/missing entry for an instance — the
+// tri-state itself models "no signal" as `{status:"unknown", reason:...}`, so
+// an unexpected error here degrades to that SAME honest-unknown shape (never
+// to an absent map entry the card could render as nothing).
+async function loadSiteMetadataState(
+  instances: WordPressMcpInstance[],
+): Promise<Map<string, ConnectedSiteMetadata>> {
+  const deps = getWordPressDeps();
+  const entries = await Promise.all(
+    instances.map(async (instance): Promise<[string, ConnectedSiteMetadata]> => {
+      let metadata: ConnectedSiteMetadata;
+      try {
+        metadata = (await deps.resolveConnectedSiteMetadata?.(instance.id)) ?? {
+          status: "unknown",
+          reason: "no_inventory",
+        };
+      } catch {
+        metadata = { status: "unknown", reason: "no_inventory" };
+      }
+      return [instance.id, metadata];
+    }),
+  );
+  return new Map(entries);
+}
+
 // Nango frontend config + connection-service status are read from the injected
 // host port `ctx.nango.*` (host-port inversion), so the connector carries no
 // `@cinatra-ai/nango-connector` import. The host builds the grant-aware ctx and
@@ -76,6 +105,7 @@ export async function WordPressSettingsPage(props: {
   const nangoFrontendConfig = (await ctx.nango.getFrontendConfig?.()) ?? {};
   const nangoStatus = (await ctx.nango.getStatus?.()) ?? { status: "not_connected" as const };
   const trustedSite = await loadTrustedSiteState(instances);
+  const siteMetadata = await loadSiteMetadataState(instances);
 
   return (
     // Standard connector-setup PAGE chrome. This is a MULTI connection
@@ -145,7 +175,11 @@ export async function WordPressSettingsPage(props: {
             at the Wide column like Setup — the Narrow width is for Help and
             other custom config tabs (codex convergence, PR #70). */}
         <TabsContent value="connections" forceMount className="mt-6 w-full data-[state=inactive]:hidden">
-          <WordPressConnectionsSection instances={instances} trustedSite={trustedSite} />
+          <WordPressConnectionsSection
+            instances={instances}
+            trustedSite={trustedSite}
+            siteMetadata={siteMetadata}
+          />
         </TabsContent>
 
         {/* Help — reserved, always LAST, read-only (no form, no Save): the
@@ -187,9 +221,11 @@ export async function WordPressSettingsPage(props: {
 function WordPressConnectionsSection({
   instances,
   trustedSite,
+  siteMetadata,
 }: {
   instances: WordPressMcpInstance[];
   trustedSite: Map<string, TrustedSiteState>;
+  siteMetadata: Map<string, ConnectedSiteMetadata>;
 }) {
   return (
     // Card-less tab frame (§II "the form is never wrapped in its own card");
@@ -236,6 +272,11 @@ function WordPressConnectionsSection({
                   </form>
                 </div>
               </div>
+              <WordPressLeastPrivilegeCard
+                metadata={
+                  siteMetadata.get(instance.id) ?? { status: "unknown", reason: "no_inventory" }
+                }
+              />
               <WordPressTrustedSiteCard
                 instanceId={instance.id}
                 instanceName={instance.name}

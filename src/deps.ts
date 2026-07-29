@@ -392,6 +392,57 @@ export type NativeReadInjectionExplain = {
   ejected: NativeReadInjectionEjection[];
 };
 
+// ---------------------------------------------------------------------------
+// Connected-site metadata — least-privilege warning (cinatra#2021 S6).
+//
+// The last-accepted, typed site metadata for a connected instance (WP/PHP
+// version, plugin versions, the connected Application-Password user's role,
+// permalink structure) — HOST-computed and published on the
+// `@cinatra-ai/host:wordpress-mcp` service (`resolveConnectedSiteMetadata`,
+// cinatra's `src/lib/connector-instance-site-metadata.ts`). The connector never
+// reads the underlying store directly.
+//
+// DELIBERATE TRI-STATE, never a plain nullable: the host member never resolves
+// null/undefined for "no signal" — a site that has never reported, or whose
+// last report failed to parse, is `{status:"unknown", reason:...}`,
+// structurally distinct from `{status:"known", ...}`. A binary present/absent
+// shape would let "no signal" collapse into whatever a caller treats as the
+// falsy default — the exact "silence reads as safety" failure this member
+// exists to rule out for the least-privilege warning card
+// (`wordpress-least-privilege-card.tsx`), which renders one of Administrator /
+// Unknown / Non-administrator for EVERY instance, never nothing.
+// ---------------------------------------------------------------------------
+
+/** One connected instance's last-accepted site report. */
+export type ConnectedSiteMetadataKnown = {
+  status: "known";
+  wpVersion: string;
+  phpVersion: string;
+  adapterVersion: string | null;
+  abilitiesPluginVersion: string | null;
+  /** The connected Application-Password user's primary role NAME (e.g.
+   * `"administrator"`). Surfacing only — never an authorization input; and a
+   * role NAME does not catch a custom role granting equivalent capabilities
+   * under a different name (stated in the card's own copy, not just here). */
+  connectedUserRole: string;
+  permalinkStructure: "pretty" | "plain";
+  receivedAt: string;
+};
+/** No signal, discriminated by WHY: `no_inventory` — the instance has never had
+ * a report accepted (an older/uninstalled companion plugin, or the intake
+ * route simply hasn't run for it yet) — INCLUDING when this host doesn't
+ * publish `resolveConnectedSiteMetadata` at all (an older Cinatra; the deps
+ * adapter in register.ts degrades to this same reason, never to a crash or a
+ * silently-absent card). `unparseable` — a report exists but failed the
+ * host's lenient re-parse (a legacy/malformed/future-shaped blob). Both render
+ * the SAME neutral caution in the card — the distinction is copy-only, never a
+ * trust signal. */
+export type ConnectedSiteMetadataUnknown = {
+  status: "unknown";
+  reason: "no_inventory" | "unparseable";
+};
+export type ConnectedSiteMetadata = ConnectedSiteMetadataKnown | ConnectedSiteMetadataUnknown;
+
 /** The host surface an external-MCP toolbox build is being assembled for —
  * structurally identical to the SDK `ExtensionToolboxBuildContext["surface"]`
  * union (cinatra#2019 S4). Only `"chat"` may ever emit native injection; the
@@ -669,6 +720,22 @@ export interface WordPressConnectorDeps {
   buildNativeReadInjection?: (
     input: NativeReadInjectionBuildInput,
   ) => Promise<NativeReadInjectionBuildResult | null>;
+  /**
+   * Resolve one instance's connected-site metadata (cinatra#2021 S6, D8) — the
+   * least-privilege warning card's ONLY data source. Unlike
+   * `readNativeInjectionPolicy` (which resolves `null` for "host doesn't
+   * support this"), this member NEVER resolves null/undefined: it always
+   * returns the discriminated `ConnectedSiteMetadata` tri-state, and the
+   * register.ts adapter degrades an absent host member to
+   * `{status:"unknown", reason:"no_inventory"}` — the same shape a
+   * genuinely-silent site produces — rather than to null, so a skewed (older)
+   * host can never make this member disappear into an optional the card could
+   * `??`-collapse into silence. OPTIONAL here only for the same skew-binding
+   * reason every other member in this block is (a deps object built by
+   * something other than THIS repo's register.ts, e.g. a hand-built test
+   * stub, may omit it) — register.ts's own binding always assigns it.
+   */
+  resolveConnectedSiteMetadata?: (instanceId: string) => Promise<ConnectedSiteMetadata>;
 }
 
 const WORDPRESS_DEPS_KEY = Symbol.for("@cinatra-ai/wordpress-mcp-connector:host-deps/v1");
