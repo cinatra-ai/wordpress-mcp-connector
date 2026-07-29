@@ -30,6 +30,7 @@ import { deleteWordPressInstanceAction } from "./setup-actions";
 import { WordPressNangoConnectCard } from "./wordpress-nango-connect-card";
 import { WordPressTrustedSiteCard } from "./wordpress-trusted-site-card";
 import { WordPressLeastPrivilegeCard } from "./wordpress-least-privilege-card";
+import { WordPressRemoteAssistInstallCard } from "./wordpress-remote-assist-install-card";
 
 // Per-instance trusted-site opt-in state resolved server-side for the settings
 // card (cinatra#2019). `policy === null` ⇒ the host does not expose the surface;
@@ -106,6 +107,11 @@ export async function WordPressSettingsPage(props: {
   const nangoStatus = (await ctx.nango.getStatus?.()) ?? { status: "not_connected" as const };
   const trustedSite = await loadTrustedSiteState(instances);
   const siteMetadata = await loadSiteMetadataState(instances);
+  // cinatra#2021 S6/delta — remote-assist catalog-plugin install. Skew-safe:
+  // a connector build that predates the deps member renders the card's
+  // explicit "not available" state rather than a button that would only
+  // ever fail when clicked.
+  const remoteAssistAvailable = typeof getWordPressDeps().installCatalogPluginRemote === "function";
 
   return (
     // Standard connector-setup PAGE chrome. This is a MULTI connection
@@ -179,6 +185,7 @@ export async function WordPressSettingsPage(props: {
             instances={instances}
             trustedSite={trustedSite}
             siteMetadata={siteMetadata}
+            remoteAssistAvailable={remoteAssistAvailable}
           />
         </TabsContent>
 
@@ -222,10 +229,12 @@ function WordPressConnectionsSection({
   instances,
   trustedSite,
   siteMetadata,
+  remoteAssistAvailable,
 }: {
   instances: WordPressMcpInstance[];
   trustedSite: Map<string, TrustedSiteState>;
   siteMetadata: Map<string, ConnectedSiteMetadata>;
+  remoteAssistAvailable: boolean;
 }) {
   return (
     // Card-less tab frame (§II "the form is never wrapped in its own card");
@@ -282,6 +291,14 @@ function WordPressConnectionsSection({
                 instanceName={instance.name}
                 policy={trustedSite.get(instance.id)?.policy ?? null}
                 explain={trustedSite.get(instance.id)?.explain ?? null}
+              />
+              {/* cinatra#2021 S6/delta — a SEPARATE card from the
+                  least-privilege and trusted-site cards above (own file, own
+                  state, own server action); the action card renders last so
+                  the disclosure/warning surfaces always read before it. */}
+              <WordPressRemoteAssistInstallCard
+                instanceId={instance.id}
+                available={remoteAssistAvailable}
               />
             </article>
           ))}
