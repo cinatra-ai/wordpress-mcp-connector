@@ -54,6 +54,15 @@ vi.mock("../wordpress-trusted-site-card", () => ({
   ),
 }));
 
+// The least-privilege warning card (cinatra#2021 S6) has its own test file
+// (wordpress-least-privilege-card.test.tsx); stub it here so this test stays
+// scoped to the tab structure/content-mapping/a11y contract.
+vi.mock("../wordpress-least-privilege-card", () => ({
+  WordPressLeastPrivilegeCard: () => (
+    <div data-testid="least-privilege-card-stub">Least-privilege check</div>
+  ),
+}));
+
 import { WordPressSettingsPage } from "../settings-page";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
