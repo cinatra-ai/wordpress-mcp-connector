@@ -21,6 +21,7 @@ import { Badge } from "./components/ui/badge";
 import {
   getWordPressDeps,
   listInstancesSorted,
+  type ConnectedSiteMetadata,
   type NativeReadInjectionExplain,
   type NativeReadInjectionPolicyView,
   type WordPressMcpInstance,
@@ -28,6 +29,7 @@ import {
 import { deleteWordPressInstanceAction } from "./setup-actions";
 import { WordPressNangoConnectCard } from "./wordpress-nango-connect-card";
 import { WordPressTrustedSiteCard } from "./wordpress-trusted-site-card";
+import { WordPressLeastPrivilegeCard } from "./wordpress-least-privilege-card";
 import { WordPressRemoteAssistInstallCard } from "./wordpress-remote-assist-install-card";
 
 // Per-instance trusted-site opt-in state resolved server-side for the settings
@@ -64,6 +66,33 @@ async function loadTrustedSiteState(
   return new Map(entries);
 }
 
+// Per-instance connected-site metadata resolved server-side for the
+// least-privilege warning card (cinatra#2021 S6). UNLIKE `loadTrustedSiteState`
+// above, this never resolves to a null/missing entry for an instance — the
+// tri-state itself models "no signal" as `{status:"unknown", reason:...}`, so
+// an unexpected error here degrades to that SAME honest-unknown shape (never
+// to an absent map entry the card could render as nothing).
+async function loadSiteMetadataState(
+  instances: WordPressMcpInstance[],
+): Promise<Map<string, ConnectedSiteMetadata>> {
+  const deps = getWordPressDeps();
+  const entries = await Promise.all(
+    instances.map(async (instance): Promise<[string, ConnectedSiteMetadata]> => {
+      let metadata: ConnectedSiteMetadata;
+      try {
+        metadata = (await deps.resolveConnectedSiteMetadata?.(instance.id)) ?? {
+          status: "unknown",
+          reason: "no_inventory",
+        };
+      } catch {
+        metadata = { status: "unknown", reason: "no_inventory" };
+      }
+      return [instance.id, metadata];
+    }),
+  );
+  return new Map(entries);
+}
+
 // Nango frontend config + connection-service status are read from the injected
 // host port `ctx.nango.*` (host-port inversion), so the connector carries no
 // `@cinatra-ai/nango-connector` import. The host builds the grant-aware ctx and
@@ -77,6 +106,7 @@ export async function WordPressSettingsPage(props: {
   const nangoFrontendConfig = (await ctx.nango.getFrontendConfig?.()) ?? {};
   const nangoStatus = (await ctx.nango.getStatus?.()) ?? { status: "not_connected" as const };
   const trustedSite = await loadTrustedSiteState(instances);
+  const siteMetadata = await loadSiteMetadataState(instances);
   // cinatra#2021 S6/delta — remote-assist catalog-plugin install. Skew-safe:
   // a connector build that predates the deps member renders the card's
   // explicit "not available" state rather than a button that would only
@@ -154,6 +184,7 @@ export async function WordPressSettingsPage(props: {
           <WordPressConnectionsSection
             instances={instances}
             trustedSite={trustedSite}
+            siteMetadata={siteMetadata}
             remoteAssistAvailable={remoteAssistAvailable}
           />
         </TabsContent>
@@ -197,10 +228,12 @@ export async function WordPressSettingsPage(props: {
 function WordPressConnectionsSection({
   instances,
   trustedSite,
+  siteMetadata,
   remoteAssistAvailable,
 }: {
   instances: WordPressMcpInstance[];
   trustedSite: Map<string, TrustedSiteState>;
+  siteMetadata: Map<string, ConnectedSiteMetadata>;
   remoteAssistAvailable: boolean;
 }) {
   return (
@@ -248,17 +281,21 @@ function WordPressConnectionsSection({
                   </form>
                 </div>
               </div>
+              <WordPressLeastPrivilegeCard
+                metadata={
+                  siteMetadata.get(instance.id) ?? { status: "unknown", reason: "no_inventory" }
+                }
+              />
               <WordPressTrustedSiteCard
                 instanceId={instance.id}
                 instanceName={instance.name}
                 policy={trustedSite.get(instance.id)?.policy ?? null}
                 explain={trustedSite.get(instance.id)?.explain ?? null}
               />
-              {/* cinatra#2021 S6/delta — a SEPARATE card from the trusted-site
-                  card above (own file, own state, own server action); kept as
-                  a single self-contained insertion here so it stays a clean
-                  rebase target alongside the S6/gamma least-privilege warning
-                  card landing on this same per-instance surface. */}
+              {/* cinatra#2021 S6/delta — a SEPARATE card from the
+                  least-privilege and trusted-site cards above (own file, own
+                  state, own server action); the action card renders last so
+                  the disclosure/warning surfaces always read before it. */}
               <WordPressRemoteAssistInstallCard
                 instanceId={instance.id}
                 available={remoteAssistAvailable}

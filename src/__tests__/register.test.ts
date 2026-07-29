@@ -237,6 +237,120 @@ describe("register(ctx) — transport-DI deps binding (Stage 3)", () => {
     expect(buildNativeReadInjection).toHaveBeenCalledWith({ instanceId: "wp-1", surface: "chat" });
   });
 
+  it("resolveConnectedSiteMetadata degrades to the tri-state's OWN unknown/no_inventory shape on a host that predates the member — NEVER null, NEVER a throw (cinatra#2021 S6 skew, D6/D8 silence-as-safety)", async () => {
+    // This is the exact skew boundary the least-privilege warning card's
+    // "never renders nothing" guarantee depends on: an older Cinatra that
+    // simply doesn't have this member yet must be INDISTINGUISHABLE, from the
+    // card's point of view, from a site that has genuinely never reported —
+    // both are the SAME honest "unknown" state, never a silent null a caller
+    // could `??`-collapse away, and never a thrown error that could crash the
+    // settings page.
+    activateWithServices({
+      "@cinatra-ai/host:wordpress-mcp": {
+        listInstances: vi.fn(() => []),
+        probeAdapter: vi.fn(),
+        resolveServerUrl: vi.fn(),
+        isPrivateUrl: vi.fn(),
+        deleteInstance: vi.fn(),
+        getAPIStatus: vi.fn(),
+        // NO resolveConnectedSiteMetadata member (a pre-S6 Cinatra).
+      },
+    });
+    await expect(
+      getWordPressDeps().resolveConnectedSiteMetadata?.("wp-1"),
+    ).resolves.toEqual({ status: "unknown", reason: "no_inventory" });
+
+    // With the member published, the host's tri-state passes through
+    // VERBATIM — including a "known" (administrator) result, so the connector
+    // adapter never re-interprets or waters down what the host reported.
+    const known = {
+      status: "known" as const,
+      wpVersion: "6.9",
+      phpVersion: "8.2",
+      adapterVersion: "1.0.0",
+      abilitiesPluginVersion: null,
+      connectedUserRole: "administrator",
+      permalinkStructure: "pretty" as const,
+      receivedAt: "2026-07-01T00:00:00.000Z",
+    };
+    const resolveConnectedSiteMetadata = vi.fn(async () => known);
+    activateWithServices({
+      "@cinatra-ai/host:wordpress-mcp": {
+        listInstances: vi.fn(() => []),
+        probeAdapter: vi.fn(),
+        resolveServerUrl: vi.fn(),
+        isPrivateUrl: vi.fn(),
+        deleteInstance: vi.fn(),
+        getAPIStatus: vi.fn(),
+        resolveConnectedSiteMetadata,
+      },
+    });
+    await expect(getWordPressDeps().resolveConnectedSiteMetadata?.("wp-1")).resolves.toBe(known);
+    expect(resolveConnectedSiteMetadata).toHaveBeenCalledWith("wp-1");
+
+    // And an "unknown" host result also passes through verbatim (the
+    // connector adapter never collapses a host-reported unknown into a
+    // DIFFERENT unknown reason).
+    const hostUnparseable = { status: "unknown" as const, reason: "unparseable" as const };
+    activateWithServices({
+      "@cinatra-ai/host:wordpress-mcp": {
+        listInstances: vi.fn(() => []),
+        probeAdapter: vi.fn(),
+        resolveServerUrl: vi.fn(),
+        isPrivateUrl: vi.fn(),
+        deleteInstance: vi.fn(),
+        getAPIStatus: vi.fn(),
+        resolveConnectedSiteMetadata: vi.fn(async () => hostUnparseable),
+      },
+    });
+    await expect(
+      getWordPressDeps().resolveConnectedSiteMetadata?.("wp-1"),
+    ).resolves.toEqual({ status: "unknown", reason: "unparseable" });
+  });
+
+  it("resolveConnectedSiteMetadata degrades to unknown/no_inventory even when a PUBLISHED host implementation itself throws or resolves null — the guarantee is enforced at THIS layer, not merely delegated to the caller", async () => {
+    // A host that DOES publish the member but violates its own contract (a
+    // rejected promise, or a contract-violating null/undefined resolve) must
+    // not surface as a rejected promise or a nullish value here — the whole
+    // point of resolving this member centrally is that every caller (the
+    // settings page today, any future consumer) gets the SAME honest
+    // "unknown" guarantee without having to re-implement its own catch/??.
+    activateWithServices({
+      "@cinatra-ai/host:wordpress-mcp": {
+        listInstances: vi.fn(() => []),
+        probeAdapter: vi.fn(),
+        resolveServerUrl: vi.fn(),
+        isPrivateUrl: vi.fn(),
+        deleteInstance: vi.fn(),
+        getAPIStatus: vi.fn(),
+        resolveConnectedSiteMetadata: vi.fn(async () => {
+          throw new Error("simulated host-side failure (e.g. a DB read error)");
+        }),
+      },
+    });
+    await expect(
+      getWordPressDeps().resolveConnectedSiteMetadata?.("wp-1"),
+    ).resolves.toEqual({ status: "unknown", reason: "no_inventory" });
+
+    activateWithServices({
+      "@cinatra-ai/host:wordpress-mcp": {
+        listInstances: vi.fn(() => []),
+        probeAdapter: vi.fn(),
+        resolveServerUrl: vi.fn(),
+        isPrivateUrl: vi.fn(),
+        deleteInstance: vi.fn(),
+        getAPIStatus: vi.fn(),
+        // Contract-violating: a published member that resolves null instead
+        // of a real tri-state (should never happen per the host's own
+        // typing, but the adapter does not TRUST that — it verifies).
+        resolveConnectedSiteMetadata: vi.fn(async () => null as never),
+      },
+    });
+    await expect(
+      getWordPressDeps().resolveConnectedSiteMetadata?.("wp-1"),
+    ).resolves.toEqual({ status: "unknown", reason: "no_inventory" });
+  });
+
   it("fails LOUD (descriptive) on a missing host service at call time", () => {
     activateWithServices({});
     expect(() => getWordPressDeps().listMcpInstances()).toThrow(
