@@ -418,6 +418,59 @@ export type NativeReadInjectionBuildResult = {
   allowedTools: string[];
 };
 
+// ---------------------------------------------------------------------------
+// Remote-assist catalog-plugin install (cinatra#2021 S6/delta) — the ONE
+// surface in this program that lets Cinatra itself trigger a WRITE on the
+// connected site's own WordPress install, using the stored Application
+// Password. It targets ONLY the wordpress.org catalog plugin
+// (`enable-abilities-for-mcp`) via the standard `POST /wp/v2/plugins` REST
+// route — the GitHub-only MCP Adapter is structurally impossible to reach
+// this way, since that route only ever accepts a wordpress.org slug. There is
+// no slug/URL parameter anywhere on this seam (in the deps member, the
+// server action, or the form) — the catalog slug is hardcoded connector-side,
+// so this call can never be redirected at a different plugin.
+//
+// AUTHORITY: WordPress's OWN `install_plugins` REST capability check on the
+// connected user is the SOLE authority on whether the install may proceed.
+// This deps member does not pre-flight or infer that capability from
+// anything Cinatra stores (the v1 site-inventory schema carries a role NAME
+// only, explicitly "surfacing only, never an authorization input" — adding a
+// capability bit would need a contract version bump this feature does not
+// need). A `403` from the site is the real answer, not a proxy for it, and is
+// surfaced as its own `forbidden` outcome — never retried, never treated as
+// grounds to reconnect as a different user, never silently swallowed.
+//
+// The request sends `status:"inactive"` (never defaulting to active):
+// WordPress's plugin REST controller additionally requires `activate_plugins`
+// whenever the requested status is not `"inactive"`, so this action only ever
+// needs to clear the ONE capability it is named for — activation stays a
+// separate, explicit, site-admin-performed step in wp-admin.
+// ---------------------------------------------------------------------------
+
+/** The hardcoded wordpress.org catalog plugin slug this action installs.
+ * Never sourced from caller input anywhere on this seam. */
+export const REMOTE_ASSIST_CATALOG_PLUGIN_SLUG = "enable-abilities-for-mcp";
+
+/**
+ * Outcome of a remote-assist catalog-plugin install attempt. A discriminated
+ * union (not a plain nullable/boolean) so a caller is structurally forced to
+ * handle the `forbidden` branch as its own rendered state — the same
+ * silence-is-not-safety posture as the D6/D8 tri-state site-metadata read
+ * (never let an absent/failed signal collapse into a shape that could be
+ * misread as success).
+ *  - `installed`  — WordPress accepted the install (2xx). `plugin` is the
+ *    WP-reported plugin file identifier; the plugin is installed INACTIVE.
+ *  - `forbidden`  — WordPress's `install_plugins` REST capability check
+ *    denied the request (403). This IS the authority — never a client guess.
+ *  - `error`      — any other non-2xx response, timeout, or transport
+ *    failure. `wpMessage` carries the WordPress REST error VERBATIM when one
+ *    was returned (never invented), or a locally-described failure otherwise.
+ */
+export type InstallCatalogPluginOutcome =
+  | { outcome: "installed"; status: number; plugin: string }
+  | { outcome: "forbidden"; status: 403 }
+  | { outcome: "error"; status: number; wpCode?: string; wpMessage: string };
+
 export interface WordPressConnectorDeps {
   decodeCursor: (cursor?: string) => number;
   buildListPage: <T>(items: T[], total: number, offset: number, limit: number) => ListPage<T>;
@@ -669,6 +722,19 @@ export interface WordPressConnectorDeps {
   buildNativeReadInjection?: (
     input: NativeReadInjectionBuildInput,
   ) => Promise<NativeReadInjectionBuildResult | null>;
+  // ---- remote-assist catalog-plugin install (cinatra#2021 S6/delta; OPTIONAL) ----
+  /**
+   * Attempt the audited remote-assist install of the hardcoded wordpress.org
+   * catalog plugin on ONE instance, through the connector's EXISTING
+   * authenticated REST path (`resolveWordPressBasicAuth` — no new credential
+   * handling introduced by this member). Takes only an instance id: there is
+   * no slug/URL parameter here, so this call can never target any plugin
+   * other than `REMOTE_ASSIST_CATALOG_PLUGIN_SLUG`. See the outcome type doc
+   * for the full authority/never-retry posture. OPTIONAL for skew: a
+   * connector build that predates this member leaves it UNBOUND — the
+   * server action then reports the feature unavailable rather than crashing.
+   */
+  installCatalogPluginRemote?: (instanceId: string) => Promise<InstallCatalogPluginOutcome>;
 }
 
 const WORDPRESS_DEPS_KEY = Symbol.for("@cinatra-ai/wordpress-mcp-connector:host-deps/v1");

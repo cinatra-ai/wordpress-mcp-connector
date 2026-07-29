@@ -183,6 +183,26 @@ export type WordPressWebhookSubscription = {
   created_at: string;
 };
 
+// cinatra#2021 S6/delta — remote-assist catalog-plugin install. This
+// constant is this client's OWN copy of the SAME hardcoded slug
+// `../deps.ts`'s `REMOTE_ASSIST_CATALOG_PLUGIN_SLUG` names (this client
+// stays leaf-only / does not import `../deps.ts` — the same boundary every
+// other type pair across that seam already keeps, e.g.
+// `WordPressInstanceSettings` vs `WordPressMcpInstance`). A unit test
+// asserts the two literals stay equal so this never silently drifts. There
+// is NO slug/URL parameter anywhere on the install call below — this is the
+// only plugin identifier that can ever reach it.
+export const REMOTE_ASSIST_CATALOG_PLUGIN_SLUG = "enable-abilities-for-mcp";
+
+/** Outcome of `installCatalogPluginRemote` — see the identically-shaped
+ * `InstallCatalogPluginOutcome` doc in `../deps.ts` for the full
+ * authority/never-retry contract (WordPress's OWN `install_plugins` REST
+ * check is the sole authority; `forbidden` IS that 403, never a guess). */
+export type InstallCatalogPluginOutcome =
+  | { outcome: "installed"; status: number; plugin: string }
+  | { outcome: "forbidden"; status: 403 }
+  | { outcome: "error"; status: number; wpCode?: string; wpMessage: string };
+
 // ---------------------------------------------------------------------------
 // Local STRUCTURAL shapes of the host services this client resolves (the
 // host-peer value-import ban: host services arrive as DATA through
@@ -355,6 +375,11 @@ export type WordPressClient = {
     instance: Pick<WordPressInstanceSettings, "siteUrl" | "username" | "applicationPassword">,
     subscriptionId: string,
   ): Promise<void>;
+  /**
+   * REMOTE-ASSIST catalog-plugin install (cinatra#2021 S6/delta) — see
+   * `InstallCatalogPluginOutcome` above for the full contract.
+   */
+  installCatalogPluginRemote(instanceId: string): Promise<InstallCatalogPluginOutcome>;
 };
 
 /**
@@ -1731,6 +1756,120 @@ export function createWordPressClient(ctx: ExtensionHostContext): WordPressClien
     }
   }
 
+  /**
+   * REMOTE-ASSIST catalog-plugin install (cinatra#2021 S6/delta). A
+   * `POST /wp/v2/plugins` call requesting ONLY
+   * `REMOTE_ASSIST_CATALOG_PLUGIN_SLUG` with `status:"inactive"` (never
+   * defaulting to active — WordPress additionally requires
+   * `activate_plugins` whenever the requested status is not `"inactive"`, so
+   * this call only ever needs `install_plugins`), through the SAME
+   * `resolveWordPressBasicAuth` credential path every other writer in this
+   * client uses (Nango + the #1077 use-gate + request/response audit
+   * capture below) — no new credential handling. WordPress's own REST
+   * capability check is the SOLE authority: a `403` is returned as its own
+   * `forbidden` outcome, never retried, never treated as grounds to resolve
+   * a different credential or re-authenticate as someone else. Any other
+   * non-2xx response, timeout, or transport failure returns `error` with the
+   * WordPress REST message VERBATIM when one was returned. Never throws —
+   * every path (missing instance, credential-resolution failure, network
+   * failure, non-2xx response) resolves a typed outcome so a caller can
+   * render it without an uncaught rejection.
+   */
+  async function installCatalogPluginRemote(instanceId: string): Promise<InstallCatalogPluginOutcome> {
+    const instance = readWordPressInstanceById(instanceId);
+    if (!instance) {
+      return {
+        outcome: "error",
+        status: 0,
+        wpMessage: "This WordPress instance is no longer configured.",
+      };
+    }
+
+    let auth: { username: string; authHeader: string };
+    try {
+      auth = await resolveWordPressBasicAuth(instance);
+    } catch (err) {
+      return {
+        outcome: "error",
+        status: 0,
+        wpMessage:
+          err instanceof Error ? err.message : "Could not resolve this site's connection credential.",
+      };
+    }
+
+    const endpoint = buildRESTEndpoint(instance.siteUrl, "/plugins");
+    const requestBody = { slug: REMOTE_ASSIST_CATALOG_PLUGIN_SLUG, status: "inactive" as const };
+
+    // No-throw audit wrapper: `writeWordPressLogFile` awaits the host capture
+    // surface unguarded, which is fine for this client's throw-on-error
+    // members but would let a capture failure reject PAST this member's
+    // typed-outcome contract — including after WordPress already responded. A
+    // failed audit write must never change the install outcome.
+    const logInstallEvent = async (kind: "request" | "response", body: unknown) => {
+      try {
+        await writeWordPressLogFile({
+          label: "wordpress-install-catalog-plugin-remote",
+          kind,
+          body,
+        });
+      } catch {
+        // Swallowed by design — the capture channel is best-effort here.
+      }
+    };
+
+    await logInstallEvent("request", {
+      endpoint,
+      method: "POST",
+      siteUrl: instance.siteUrl,
+      username: auth.username,
+      body: requestBody,
+    });
+
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(endpoint, {
+        method: "POST",
+        headers: {
+          Authorization: auth.authHeader,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify(requestBody),
+        cache: "no-store",
+      });
+    } catch (err) {
+      const wpMessage = err instanceof Error ? err.message : "Could not reach this site.";
+      await logInstallEvent("response", { status: 0, error: wpMessage });
+      return { outcome: "error", status: 0, wpMessage };
+    }
+
+    const payload = (await response.json().catch(() => null)) as
+      | { plugin?: string; status?: string; code?: string; message?: string }
+      | null;
+
+    await logInstallEvent("response", { status: response.status, body: payload });
+
+    if (response.status === 403) {
+      return { outcome: "forbidden", status: 403 };
+    }
+    if (response.ok) {
+      return {
+        outcome: "installed",
+        status: response.status,
+        plugin: payload?.plugin ?? REMOTE_ASSIST_CATALOG_PLUGIN_SLUG,
+      };
+    }
+
+    return {
+      outcome: "error",
+      status: response.status,
+      wpCode: payload?.code,
+      wpMessage:
+        payload?.message ||
+        `WordPress returned HTTP ${response.status} while installing ${REMOTE_ASSIST_CATALOG_PLUGIN_SLUG}.`,
+    };
+  }
+
   return {
     getWordPressAPISettings,
     getWordPressLoggingSettings,
@@ -1756,5 +1895,6 @@ export function createWordPressClient(ctx: ExtensionHostContext): WordPressClien
     listWordPressWebhookSubscriptions,
     registerWordPressWebhookSubscription,
     deleteWordPressWebhookSubscription,
+    installCatalogPluginRemote,
   };
 }

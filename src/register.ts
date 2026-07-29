@@ -322,6 +322,14 @@ function buildHostBoundDeps(
         ? svc.buildNativeReadInjection(input)
         : null;
     },
+    // cinatra#2021 S6/delta — remote-assist catalog-plugin install. Bound
+    // directly from THIS connector's OWN client (not the `wordpressMcp()`
+    // host-service indirection above): the install call reuses the client's
+    // existing `resolveWordPressBasicAuth` credential path (Nango + the
+    // #1077 use-gate + audit capture), so there is no new credential
+    // handling and no new host capability to resolve. See
+    // `InstallCatalogPluginOutcome` in `./deps` for the full contract.
+    installCatalogPluginRemote: (instanceId) => wordpressClient.installCatalogPluginRemote(instanceId),
   };
 }
 

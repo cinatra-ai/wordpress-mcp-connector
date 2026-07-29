@@ -28,6 +28,7 @@ import {
 import { deleteWordPressInstanceAction } from "./setup-actions";
 import { WordPressNangoConnectCard } from "./wordpress-nango-connect-card";
 import { WordPressTrustedSiteCard } from "./wordpress-trusted-site-card";
+import { WordPressRemoteAssistInstallCard } from "./wordpress-remote-assist-install-card";
 
 // Per-instance trusted-site opt-in state resolved server-side for the settings
 // card (cinatra#2019). `policy === null` ⇒ the host does not expose the surface;
@@ -76,6 +77,11 @@ export async function WordPressSettingsPage(props: {
   const nangoFrontendConfig = (await ctx.nango.getFrontendConfig?.()) ?? {};
   const nangoStatus = (await ctx.nango.getStatus?.()) ?? { status: "not_connected" as const };
   const trustedSite = await loadTrustedSiteState(instances);
+  // cinatra#2021 S6/delta — remote-assist catalog-plugin install. Skew-safe:
+  // a connector build that predates the deps member renders the card's
+  // explicit "not available" state rather than a button that would only
+  // ever fail when clicked.
+  const remoteAssistAvailable = typeof getWordPressDeps().installCatalogPluginRemote === "function";
 
   return (
     // Standard connector-setup PAGE chrome. This is a MULTI connection
@@ -145,7 +151,11 @@ export async function WordPressSettingsPage(props: {
             at the Wide column like Setup — the Narrow width is for Help and
             other custom config tabs (codex convergence, PR #70). */}
         <TabsContent value="connections" forceMount className="mt-6 w-full data-[state=inactive]:hidden">
-          <WordPressConnectionsSection instances={instances} trustedSite={trustedSite} />
+          <WordPressConnectionsSection
+            instances={instances}
+            trustedSite={trustedSite}
+            remoteAssistAvailable={remoteAssistAvailable}
+          />
         </TabsContent>
 
         {/* Help — reserved, always LAST, read-only (no form, no Save): the
@@ -187,9 +197,11 @@ export async function WordPressSettingsPage(props: {
 function WordPressConnectionsSection({
   instances,
   trustedSite,
+  remoteAssistAvailable,
 }: {
   instances: WordPressMcpInstance[];
   trustedSite: Map<string, TrustedSiteState>;
+  remoteAssistAvailable: boolean;
 }) {
   return (
     // Card-less tab frame (§II "the form is never wrapped in its own card");
@@ -241,6 +253,15 @@ function WordPressConnectionsSection({
                 instanceName={instance.name}
                 policy={trustedSite.get(instance.id)?.policy ?? null}
                 explain={trustedSite.get(instance.id)?.explain ?? null}
+              />
+              {/* cinatra#2021 S6/delta — a SEPARATE card from the trusted-site
+                  card above (own file, own state, own server action); kept as
+                  a single self-contained insertion here so it stays a clean
+                  rebase target alongside the S6/gamma least-privilege warning
+                  card landing on this same per-instance surface. */}
+              <WordPressRemoteAssistInstallCard
+                instanceId={instance.id}
+                available={remoteAssistAvailable}
               />
             </article>
           ))}
