@@ -524,6 +524,80 @@ export type InstallCatalogPluginOutcome =
   | { outcome: "forbidden"; status: 403 }
   | { outcome: "error"; status: number; wpCode?: string; wpMessage: string };
 
+// ---------------------------------------------------------------------------
+// Per-instance tool access — the settings-surface view of the host's
+// per-(connector, instance) tool-policy record and its per-server health
+// matrix (cinatra-ai/cinatra#2022 S7).
+//
+// Since the chat-cutover default flip (cinatra#2232), an instance with no
+// explicit policy record has NO site tools allowed on ANY surface — chat,
+// in-admin editing, blog publishing, and freshness checks alike (the host's
+// policy evaluator is deliberately surface-independent). The settings page is
+// the sanctioned self-service path for a site owner to re-select the tools
+// their site's pipelines need; these members are its ONLY data channel. The
+// connector renders and edits the record — ENFORCEMENT stays entirely
+// host-side in the governed invoker's policy step; nothing here widens or
+// bypasses it.
+//
+// The shapes are STRUCTURAL mirrors of the host-side settings surface (the
+// vendored-shape precedent the S2 invoker contract used before its SDK
+// promotion): the host owns the canonical types; this connector compiles
+// standalone against any host it can meet during skew.
+// ---------------------------------------------------------------------------
+
+/** Policy mode. `restricted` (also the absent-record default since
+ * cinatra#2232) allows ONLY the `allow` entries; `open` allows every catalog
+ * tool except `deny` entries. Deny precedence is absolute in both modes. */
+export type InstanceToolPolicyMode = "open" | "restricted";
+
+/** One server-qualified tool identity — matching is ALWAYS on the full
+ * `{serverId, name}` pair host-side, never a bare name. */
+export type SiteToolPolicyRef = { serverId: string; name: string };
+
+/** The settings-surface view of one instance's persisted tool policy. An
+ * absent record is rendered by the HOST as `restricted` with empty lists (the
+ * enforced deny-all default) — the connector never sees an "absent" shape it
+ * could misread as open. */
+export type InstanceToolPolicyView = {
+  instanceId: string;
+  mode: InstanceToolPolicyMode;
+  allow: SiteToolPolicyRef[];
+  deny: SiteToolPolicyRef[];
+  /** Present only when an explicit persisted record exists. */
+  updatedBy?: string;
+  updatedAt?: string;
+};
+
+/** Typed outcome of the settings-page tool-policy save action. Lives here
+ * (not in setup-actions.ts) for the same reason `InstallCatalogPluginOutcome`
+ * does: a "use server" module exports only async functions, and the card
+ * needs the shape to render success / refusal inline. */
+export type SetInstanceToolPolicyOutcome =
+  | { ok: true; policy: InstanceToolPolicyView }
+  | { ok: false; message: string };
+
+/** One discovered/enrolled MCP server row for the settings health matrix — a
+ * structural SUBSET of the host's persisted enrollment record (only the
+ * fields the card renders). `lastStatus` values mirror the host's probe
+ * classification; the card renders any unrecognised value through a neutral
+ * fallback rather than crashing (forward-skew tolerance). */
+export type SiteServerHealthRow = {
+  serverId: string;
+  source: "default" | "discovered" | "manual";
+  status: "enrolled" | "present_unenrolled" | "retired";
+  label: string | null;
+  serverVersion: string | null;
+  restPath: string;
+  lastStatus:
+    | "registered"
+    | "not_installed"
+    | "auth_error"
+    | "unreachable"
+    | "catalog_unavailable"
+    | null;
+  lastStatusAt: string | null;
+};
+
 export interface WordPressConnectorDeps {
   decodeCursor: (cursor?: string) => number;
   buildListPage: <T>(items: T[], total: number, offset: number, limit: number) => ListPage<T>;
@@ -822,6 +896,40 @@ export interface WordPressConnectorDeps {
    * server action then reports the feature unavailable rather than crashing.
    */
   installCatalogPluginRemote?: (instanceId: string) => Promise<InstallCatalogPluginOutcome>;
+  // ---- per-instance tool access settings surface (cinatra#2022 S7; OPTIONAL) ----
+  /**
+   * Discovered/enrolled MCP servers for one instance, with their last probe
+   * health — the settings health matrix read. Org-admin-gated HOST-side
+   * (inside the member, like every sibling on this publication). Resolves
+   * `null` when the host publication predates the server-enrollment surface —
+   * the card then renders the matrix as unavailable rather than crashing.
+   * OPTIONAL for skew (a deps binding that predates this member leaves it
+   * unbound; the settings page's best-effort loader degrades identically).
+   */
+  listInstanceServers?: (instanceId: string) => Promise<SiteServerHealthRow[] | null>;
+  /**
+   * Current per-instance tool policy (cinatra#2022 S7 settings seam) — the
+   * record the governed invoker's policy step actually enforces, rendered
+   * honestly (absent record → restricted + empty, the post-cinatra#2232
+   * deny-all default). Org-admin-gated HOST-side. Resolves `null` when the
+   * host predates the seam — the tool-selection card then renders an explicit
+   * "update Cinatra" note instead of an editor that could only fail on save.
+   * OPTIONAL for skew.
+   */
+  readInstanceToolPolicy?: (input: { instanceId: string }) => Promise<InstanceToolPolicyView | null>;
+  /**
+   * Replace the per-instance tool policy (org-admin-gated + shape-validated +
+   * audited HOST-side; the caller supplies the FULL desired record, never a
+   * delta). Returns the persisted state after the write. THROWS on a host
+   * that predates the seam — it is only ever offered when
+   * `readInstanceToolPolicy` resolved non-null. OPTIONAL for skew.
+   */
+  setInstanceToolPolicy?: (input: {
+    instanceId: string;
+    mode: InstanceToolPolicyMode;
+    allow?: SiteToolPolicyRef[];
+    deny?: SiteToolPolicyRef[];
+  }) => Promise<InstanceToolPolicyView>;
 }
 
 const WORDPRESS_DEPS_KEY = Symbol.for("@cinatra-ai/wordpress-mcp-connector:host-deps/v1");

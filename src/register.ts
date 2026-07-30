@@ -34,6 +34,10 @@ import {
   type NativeReadInjectionBuildInput,
   type NativeReadInjectionBuildResult,
   type ConnectedSiteMetadata,
+  type InstanceToolPolicyMode,
+  type InstanceToolPolicyView,
+  type SiteServerHealthRow,
+  type SiteToolPolicyRef,
 } from "./deps";
 import {
   createWordPressClient,
@@ -89,6 +93,22 @@ type HostWordPressMcpShape = {
   // the D8 contract that "no signal" is always a discriminated, renderable
   // state, not an absent one.
   resolveConnectedSiteMetadata?: (instanceId: string) => Promise<ConnectedSiteMetadata>;
+  // Per-instance tool access settings surface (cinatra#2022 S7). OPTIONAL on
+  // the host publication: `listInstanceServers` shipped with the S3
+  // server-enrollment surface; the two tool-policy members ship with the
+  // cinatra-side settings seam companion of this connector version. The deps
+  // bindings below check for each at call time and degrade to null (reads) /
+  // fail loud (setter) — the standard skew posture of this shape. The host
+  // returns richer rows than `SiteServerHealthRow` declares; the connector
+  // types (and reads) only the fields its settings matrix renders.
+  listInstanceServers?: (instanceId: string) => Promise<SiteServerHealthRow[]>;
+  readInstanceToolPolicy?: (input: { instanceId: string }) => Promise<InstanceToolPolicyView>;
+  setInstanceToolPolicy?: (input: {
+    instanceId: string;
+    mode: InstanceToolPolicyMode;
+    allow?: SiteToolPolicyRef[];
+    deny?: SiteToolPolicyRef[];
+  }) => Promise<InstanceToolPolicyView>;
 };
 // Post/media content surface (cinatra#172 Stage H3) — the host publishes it
 // under a SEPARATE capability id from the connection-focused wordpress-mcp
@@ -367,6 +387,35 @@ function buildHostBoundDeps(
     // handling and no new host capability to resolve. See
     // `InstallCatalogPluginOutcome` in `./deps` for the full contract.
     installCatalogPluginRemote: (instanceId) => wordpressClient.installCatalogPluginRemote(instanceId),
+    // cinatra#2022 S7 — per-instance tool access settings surface. Same skew
+    // posture as the trusted-site members above: an absent host member
+    // resolves `null` for the reads (the settings cards render the piece as
+    // unavailable) and fails loud for the setter (it is only ever offered
+    // when the read resolved non-null). Authorization lives HOST-side inside
+    // each member (org-admin on the instance's owning org); the connector
+    // forwards only the non-identity coordinates.
+    listInstanceServers: async (instanceId) => {
+      const svc = wordpressMcp();
+      return typeof svc.listInstanceServers === "function"
+        ? svc.listInstanceServers(instanceId)
+        : null;
+    },
+    readInstanceToolPolicy: async (input) => {
+      const svc = wordpressMcp();
+      return typeof svc.readInstanceToolPolicy === "function"
+        ? svc.readInstanceToolPolicy(input)
+        : null;
+    },
+    setInstanceToolPolicy: async (input) => {
+      const svc = wordpressMcp();
+      if (typeof svc.setInstanceToolPolicy !== "function") {
+        throw new Error(
+          `${PACKAGE_NAME}: this Cinatra version does not support per-site tool selection — ` +
+            "update Cinatra to enable it.",
+        );
+      }
+      return svc.setInstanceToolPolicy(input);
+    },
   };
 }
 

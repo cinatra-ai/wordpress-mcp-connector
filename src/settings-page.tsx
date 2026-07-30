@@ -22,8 +22,10 @@ import {
   getWordPressDeps,
   listInstancesSorted,
   type ConnectedSiteMetadata,
+  type InstanceToolPolicyView,
   type NativeReadInjectionExplain,
   type NativeReadInjectionPolicyView,
+  type SiteServerHealthRow,
   type WordPressMcpInstance,
 } from "./deps";
 import { deleteWordPressInstanceAction } from "./setup-actions";
@@ -31,6 +33,10 @@ import { WordPressNangoConnectCard } from "./wordpress-nango-connect-card";
 import { WordPressTrustedSiteCard } from "./wordpress-trusted-site-card";
 import { WordPressLeastPrivilegeCard } from "./wordpress-least-privilege-card";
 import { WordPressRemoteAssistInstallCard } from "./wordpress-remote-assist-install-card";
+import {
+  WordPressSiteToolsCard,
+  deriveSiteConnectionBadge,
+} from "./wordpress-site-tools-card";
 
 // Per-instance trusted-site opt-in state resolved server-side for the settings
 // card (cinatra#2019). `policy === null` ⇒ the host does not expose the surface;
@@ -93,6 +99,42 @@ async function loadSiteMetadataState(
   return new Map(entries);
 }
 
+// Per-instance tool-access state for the "Site tools & access" card
+// (cinatra-ai/cinatra#2022 S7): the persisted tool policy (the record the
+// governed invoker enforces — since cinatra#2232 an instance without one has
+// NOTHING allowed on any surface) and the discovered-server health matrix.
+// Best-effort like `loadTrustedSiteState`: an older host (either member
+// unbound / resolving null) or a host-side refusal degrades to null and the
+// card renders that state explicitly — the settings page never crashes.
+type ToolAccessState = {
+  policy: InstanceToolPolicyView | null;
+  servers: SiteServerHealthRow[] | null;
+};
+
+async function loadToolAccessState(
+  instances: WordPressMcpInstance[],
+): Promise<Map<string, ToolAccessState>> {
+  const deps = getWordPressDeps();
+  const entries = await Promise.all(
+    instances.map(async (instance): Promise<[string, ToolAccessState]> => {
+      let policy: InstanceToolPolicyView | null = null;
+      let servers: SiteServerHealthRow[] | null = null;
+      try {
+        policy = (await deps.readInstanceToolPolicy?.({ instanceId: instance.id })) ?? null;
+      } catch {
+        policy = null;
+      }
+      try {
+        servers = (await deps.listInstanceServers?.(instance.id)) ?? null;
+      } catch {
+        servers = null;
+      }
+      return [instance.id, { policy, servers }];
+    }),
+  );
+  return new Map(entries);
+}
+
 // Nango frontend config + connection-service status are read from the injected
 // host port `ctx.nango.*` (host-port inversion), so the connector carries no
 // `@cinatra-ai/nango-connector` import. The host builds the grant-aware ctx and
@@ -107,6 +149,7 @@ export async function WordPressSettingsPage(props: {
   const nangoStatus = (await ctx.nango.getStatus?.()) ?? { status: "not_connected" as const };
   const trustedSite = await loadTrustedSiteState(instances);
   const siteMetadata = await loadSiteMetadataState(instances);
+  const toolAccess = await loadToolAccessState(instances);
   // cinatra#2021 S6/delta — remote-assist catalog-plugin install. Skew-safe:
   // a connector build that predates the deps member renders the card's
   // explicit "not available" state rather than a button that would only
@@ -185,6 +228,7 @@ export async function WordPressSettingsPage(props: {
             instances={instances}
             trustedSite={trustedSite}
             siteMetadata={siteMetadata}
+            toolAccess={toolAccess}
             remoteAssistAvailable={remoteAssistAvailable}
           />
         </TabsContent>
@@ -229,11 +273,13 @@ function WordPressConnectionsSection({
   instances,
   trustedSite,
   siteMetadata,
+  toolAccess,
   remoteAssistAvailable,
 }: {
   instances: WordPressMcpInstance[];
   trustedSite: Map<string, TrustedSiteState>;
   siteMetadata: Map<string, ConnectedSiteMetadata>;
+  toolAccess: Map<string, ToolAccessState>;
   remoteAssistAvailable: boolean;
 }) {
   return (
@@ -246,7 +292,13 @@ function WordPressConnectionsSection({
         </div>
       ) : (
         <div className="grid gap-4">
-          {instances.map((instance) => (
+          {instances.map((instance) => {
+            const access = toolAccess.get(instance.id) ?? { policy: null, servers: null };
+            // cinatra-ai/cinatra#2022 S7 — the header badge derives from the
+            // site's real per-server probe health (the old static "Connected"
+            // text survives only on hosts that expose no health surface).
+            const connectionBadge = deriveSiteConnectionBadge(access.servers);
+            return (
             <article
               key={instance.id}
               className="rounded-card border border-line bg-surface px-5 py-5 shadow-[0_1px_3px_rgba(21,33,58,0.06)]"
@@ -255,7 +307,7 @@ function WordPressConnectionsSection({
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <h3 className="text-[15px] font-bold text-foreground">{instance.name}</h3>
-                    <Badge variant="success">Connected</Badge>
+                    <Badge variant={connectionBadge.variant}>{connectionBadge.label}</Badge>
                   </div>
                   <p className="mt-1 font-mono text-xs text-muted-foreground">{instance.siteUrl}</p>
                   <p className="mt-1 text-xs uppercase tracking-[0.2em] text-muted-foreground">
@@ -292,6 +344,17 @@ function WordPressConnectionsSection({
                 policy={trustedSite.get(instance.id)?.policy ?? null}
                 explain={trustedSite.get(instance.id)?.explain ?? null}
               />
+              {/* cinatra-ai/cinatra#2022 S7 — discovered servers + health,
+                  per-pipeline readiness, and the per-site tool selection (the
+                  self-service re-enable path after the cinatra#2232 default
+                  flip). Renders after the warning/disclosure cards, before
+                  the remote-assist action card. */}
+              <WordPressSiteToolsCard
+                instanceId={instance.id}
+                instanceName={instance.name}
+                policy={access.policy}
+                servers={access.servers}
+              />
               {/* cinatra#2021 S6/delta — a SEPARATE card from the
                   least-privilege and trusted-site cards above (own file, own
                   state, own server action); the action card renders last so
@@ -301,7 +364,8 @@ function WordPressConnectionsSection({
                 available={remoteAssistAvailable}
               />
             </article>
-          ))}
+            );
+          })}
         </div>
       )}
     </section>
