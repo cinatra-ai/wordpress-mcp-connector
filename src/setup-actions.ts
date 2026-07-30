@@ -181,11 +181,18 @@ export async function setWordPressInstanceToolPolicyAction(
   }
 
   try {
+    // BOTH lists are ALWAYS sent explicitly — never dropped when empty — so
+    // the wire payload is unambiguous: "clear this list" and "leave this
+    // list alone" can never share a shape. (The host seam is a full-record
+    // replace either way — its normaliser maps an explicit-empty and an
+    // omitted list to the same persisted NULL and its upsert always
+    // overwrites both columns, so a clear persists regardless; sending both
+    // keeps that true by inspection rather than by contract archaeology.)
     const policy = await deps.setInstanceToolPolicy({
       instanceId,
       mode: mode as InstanceToolPolicyMode,
-      ...(allow.length > 0 ? { allow } : {}),
-      ...(deny.length > 0 ? { deny } : {}),
+      allow,
+      deny,
     });
     return { ok: true, policy };
   } catch {

@@ -329,7 +329,12 @@ export function WordPressSiteToolsCard({
                 {readiness.state === "policy_blocked" && policy ? (
                   // One-click fix: the FULL persisted record plus the missing
                   // refs appended to `allow` — a whole-record replace, so a
-                  // concurrent edit is never half-applied.
+                  // concurrent edit is never half-applied. DISABLED while the
+                  // selection editor below holds unsaved staged changes: this
+                  // form submits the PERSISTED record, and its save round-trip
+                  // resets the staged editor — firing it mid-edit would
+                  // silently discard those staged edits (the editor's own
+                  // disabled-until-valid Add/Save idiom, applied here too).
                   <form action={formAction} className="mt-2">
                     <Input type="hidden" name="instanceId" value={instanceId} />
                     <Input
@@ -348,7 +353,15 @@ export function WordPressSiteToolsCard({
                         ),
                       })}
                     />
-                    <SubmitButton label="Allow required tools" />
+                    <SubmitButton label="Allow required tools" disabled={dirty} />
+                    {dirty ? (
+                      <p
+                        data-testid="site-tools-quick-fix-dirty"
+                        className="mt-1 text-[11px] text-muted-foreground"
+                      >
+                        Save or discard your unsaved tool-selection changes below first.
+                      </p>
+                    ) : null}
                   </form>
                 ) : null}
               </li>
@@ -369,7 +382,13 @@ export function WordPressSiteToolsCard({
           </p>
         ) : (
           <>
-            <div className="mt-2 flex flex-wrap gap-2" role="radiogroup" aria-label="Tool access mode">
+            {/* A toggle-button GROUP (role="group" + aria-pressed), not a
+                radiogroup: aria-pressed children are the button-toggle
+                contract, while role="radiogroup" would promise role="radio" +
+                aria-checked + roving-tabindex/arrow-key semantics these two
+                buttons deliberately don't implement. One consistent contract,
+                not a mixed one. */}
+            <div className="mt-2 flex flex-wrap gap-2" role="group" aria-label="Tool access mode">
               <Button
                 type="button"
                 variant={staged.mode === "restricted" ? "default" : "outline"}

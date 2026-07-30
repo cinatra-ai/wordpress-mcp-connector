@@ -337,6 +337,37 @@ describe("tool-selection editor — staged edits, full-record save", () => {
     expect(buttonByText(container, /save tool selection/i)!.disabled).toBe(false);
   });
 
+  it("the mode switch is a consistent toggle-button GROUP (role=group + aria-pressed) — never a radiogroup with pressed children", async () => {
+    const container = await renderCard();
+    const group = container.querySelector('[role="group"][aria-label="Tool access mode"]');
+    expect(group).not.toBeNull();
+    expect(container.querySelector('[role="radiogroup"]')).toBeNull();
+    const pressed = Array.from(group!.querySelectorAll("button")).map((b) =>
+      b.getAttribute("aria-pressed"),
+    );
+    expect(pressed).toEqual(["true", "false"]); // restricted selected by default
+  });
+
+  it("the one-click pipeline fix disables while the editor holds unsaved changes (staged edits are never silently discarded)", async () => {
+    const container = await renderCard();
+    const quickFixButton = () =>
+      container
+        .querySelector('[data-testid="site-tools-pipeline-blog-publishing"]')!
+        .querySelector("button") as HTMLButtonElement;
+    expect(quickFixButton().disabled).toBe(false);
+    expect(container.querySelector('[data-testid="site-tools-quick-fix-dirty"]')).toBeNull();
+
+    // Any staged edit (here: the mode switch) makes the editor dirty …
+    await click(buttonByText(container, /all site tools/i)!);
+
+    // … and every pipeline quick-fix goes disabled with the explanatory hint,
+    // instead of submitting the PERSISTED record over the staged edits.
+    expect(quickFixButton().disabled).toBe(true);
+    expect(
+      container.querySelector('[data-testid="site-tools-quick-fix-dirty"]'),
+    ).not.toBeNull();
+  });
+
   it("the Add button is disabled until a tool name is entered", async () => {
     const container = await renderCard();
     const add = buttonByText(container, /^add$/i);

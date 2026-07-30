@@ -169,13 +169,39 @@ describe("setWordPressInstanceToolPolicyAction — manage-gated, shape-strict, f
     );
 
     expect(requireExtensionAction).toHaveBeenCalledWith(WORDPRESS_PACKAGE_ID, "manage");
-    // Entries are trimmed; an empty deny list is omitted, not sent as [].
+    // Entries are trimmed; BOTH lists ride every call explicitly (an empty
+    // list is sent as [], never dropped) — "clear" and "leave alone" must
+    // never share a wire shape.
     expect(setInstanceToolPolicy).toHaveBeenCalledWith({
       instanceId: "inst-1",
       mode: "restricted",
       allow: [{ serverId: "mcp-adapter-default", name: "ewpa/update-post" }],
+      deny: [],
     });
     expect(result).toEqual({ ok: true, policy: PERSISTED });
+  });
+
+  it("clearing the last allowed tool sends an EXPLICIT empty allow list — the clear is a real wire payload", async () => {
+    const setInstanceToolPolicy = vi.fn(async (): Promise<InstanceToolPolicyView> => ({
+      ...PERSISTED,
+      allow: [],
+    }));
+    registerWordPressConnector({ setInstanceToolPolicy } as never);
+
+    const result = await setWordPressInstanceToolPolicyAction(
+      formData({
+        instanceId: "inst-1",
+        policy: policyField({ mode: "restricted", allow: [], deny: [] }),
+      }),
+    );
+
+    expect(setInstanceToolPolicy).toHaveBeenCalledWith({
+      instanceId: "inst-1",
+      mode: "restricted",
+      allow: [],
+      deny: [],
+    });
+    expect(result).toEqual({ ok: true, policy: { ...PERSISTED, allow: [] } });
   });
 
   it("a manage-gate DENY throws BEFORE the deps member is ever called", async () => {
