@@ -522,8 +522,15 @@ async function callReviewGatedSiteTool(
   const args = input.args;
   const rawPostId = args.post_id;
   const postId = typeof rawPostId === "number" ? rawPostId : Number(rawPostId);
-  if (!Number.isFinite(postId) || postId <= 0) {
-    throw new Error(`wordpress_site_tool_call: "${input.toolName}" requires a positive numeric "post_id" argument.`);
+  // Integer-strict (CodeRabbit-adopted hardening): mirrors postUpdateSchema's
+  // own `z.coerce.number().int().positive()` exactly. A bare `Number(...)`
+  // finite/positive check let a decimal string ("42.5") through as a
+  // fractional "post_id" — Number.isInteger rejects it the same way `.int()`
+  // does (both still accept exponential-but-integral input like "1e2" -> 100,
+  // matching the dedicated tool's own coercion behavior — parity, not a new
+  // restriction).
+  if (!Number.isInteger(postId) || postId <= 0) {
+    throw new Error(`wordpress_site_tool_call: "${input.toolName}" requires a positive integer "post_id" argument.`);
   }
 
   // Mirror wordpress_post_update's own pre-gate hardening exactly (the same
@@ -537,6 +544,26 @@ async function callReviewGatedSiteTool(
         "invoker — use wordpress_post_update_meta for meta writes.",
     );
   }
+
+  // Reject unreviewed fields fail-closed (CodeRabbit-adopted hardening).
+  // `evaluateStagedContentWrite` below only ever diffs/reviews
+  // title/content/excerpt/status — those are the ONLY fields this trigger
+  // captures for review. Forwarding `input.args` raw on the pass/apply path
+  // below (§3.7) would let an out-of-scope field (slug, author, date,
+  // categories, ...) ride alongside an unchanged title on a no-gate `pass`
+  // verdict and write completely unreviewed. Mirrors wordpress_post_update's
+  // OWN accepted-field surface exactly (title/content/excerpt/status via its
+  // schema; meta explicitly refused above, never silently stripped) — refuse
+  // BEFORE any capture, not after.
+  const REVIEWED_ARG_KEYS = new Set(["post_id", "title", "content", "excerpt", "status"]);
+  const outOfScopeKeys = Object.keys(args).filter((k) => !REVIEWED_ARG_KEYS.has(k));
+  if (outOfScopeKeys.length > 0) {
+    throw new Error(
+      `wordpress_site_tool_call: "${input.toolName}" received field(s) outside the content-review scope ` +
+        `(${outOfScopeKeys.join(", ")}) — only post_id/title/content/excerpt/status are reviewed for this ability.`,
+    );
+  }
+
   const title = typeof args.title === "string" ? args.title : undefined;
   const content = typeof args.content === "string" ? args.content : undefined;
   const excerpt = typeof args.excerpt === "string" ? args.excerpt : undefined;
@@ -549,6 +576,18 @@ async function callReviewGatedSiteTool(
   if (!hasEditableField) {
     throw new Error(`wordpress_site_tool_call: "${input.toolName}" has no editable fields (title/content/excerpt/status).`);
   }
+
+  // cinatra#409 — per-user / per-instance write-authority gate. Mirrors
+  // wordpress_post_update's OWN ordering exactly: after all pre-gate
+  // validation above, BEFORE the review capture/write below. This ability
+  // reaches the SAME governed invoker channel wordpress_post_update uses
+  // (getWordPressDeps().invokeSiteTool) — but the invoker's own host-side
+  // authz is a separate concern from THIS connector's audited,
+  // primitiveName-keyed write-authority record (see deps.ts's
+  // requireInstanceWriteAuthority doc: "the write primitive name, for the
+  // audit row only"). Parity with the dedicated tool requires this explicit
+  // gate too, not just the shared channel.
+  await requireWriteAuthority(instanceId, "wordpress_site_tool_call");
 
   // No page-specific update ability exists (see readPostViaMcp/updatePostViaMcp's
   // own section comment above) — `ewpa/update-post`'s own wire shape carries no
@@ -601,21 +640,35 @@ async function callReviewGatedSiteTool(
   // raw ability call directly (§3.7) — so it performs its OWN independent
   // post-apply re-read here, via the SAME readPostViaMcp wordpress_post_update
   // uses, never trusting the ability's own write-response echo.
+  //
+  // TRANSIENT READ-BACK FAILURE ≠ WRITE FAILURE (CodeRabbit-adopted
+  // hardening): the mutating invoke() call above already landed. A
+  // subsequent readPostViaMcp throw (a transient MCP hiccup) must not be
+  // reported to the caller as a FAILED apply, and must not skip recording an
+  // outcome for the released gate — caught and surfaced as an unverified
+  // read-back instead.
   const seam = getWordPressDeps().cmsReview;
-  const postApply = await readPostViaMcp(instance, postId, undefined);
+  let postApply: Awaited<ReturnType<typeof readPostViaMcp>> | undefined;
+  try {
+    postApply = await readPostViaMcp(instance, postId, undefined);
+  } catch {
+    postApply = undefined;
+  }
   const readback = seam
-    ? await seam.recordApplyVerification({
-        operationId: review.operationId,
-        gateId: review.gate.gateId,
-        runId: review.gate.runId,
-        postApplyFields: {
-          title: postApply.title,
-          content: postApply.content,
-          excerpt: postApply.excerpt,
-          status: postApply.status,
-        },
-      })
-    : { ok: false, code: "seam-unbound" as const };
+    ? postApply
+      ? await seam.recordApplyVerification({
+          operationId: review.operationId,
+          gateId: review.gate.gateId,
+          runId: review.gate.runId,
+          postApplyFields: {
+            title: postApply.title,
+            content: postApply.content,
+            excerpt: postApply.excerpt,
+            status: postApply.status,
+          },
+        })
+      : { ok: false as const, code: "readback-unavailable" as const }
+    : { ok: false as const, code: "seam-unbound" as const };
 
   const reviewMeta = { operationId: review.operationId, ...readback };
   // Best-effort merge: the ability's own response shape is not pinned by this

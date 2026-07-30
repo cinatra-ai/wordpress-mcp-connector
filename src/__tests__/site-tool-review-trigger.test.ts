@@ -43,6 +43,10 @@ const listMcpInstancesMock = vi.fn((): WordPressMcpInstance[] => [
 // Rebound in beforeEach — every test gets a fresh mock, matching
 // cms-review-handler.test.ts's own convention for this exact deps member.
 let invokeSiteToolMock: ReturnType<typeof vi.fn>;
+// Rebound in beforeEach too (parity with write-authority.test.ts's own
+// convention for this dep) — default ALLOW; individual tests override to
+// DENY (reject) to model the cinatra#409 gate's fail-closed decisions.
+let requireInstanceWriteAuthorityMock: ReturnType<typeof vi.fn>;
 
 function registerStubDeps(extra: Partial<WordPressConnectorDeps> = {}) {
   registerWordPressConnector({
@@ -63,7 +67,7 @@ function registerStubDeps(extra: Partial<WordPressConnectorDeps> = {}) {
     deletePost: vi.fn(async () => ({ deleted: true })),
     uploadMedia: vi.fn(),
     updateDraftMeta: vi.fn(),
-    requireInstanceWriteAuthority: vi.fn(async () => {}),
+    requireInstanceWriteAuthority: requireInstanceWriteAuthorityMock,
     invokeSiteTool: invokeSiteToolMock,
     ...extra,
   });
@@ -119,6 +123,7 @@ const MODEL_ACTOR = { actorType: "model", source: "agent" } as const;
 beforeEach(() => {
   vi.clearAllMocks();
   invokeSiteToolMock = vi.fn();
+  requireInstanceWriteAuthorityMock = vi.fn(async () => {});
   _resetWordPressDepsForTests();
 });
 
@@ -249,8 +254,114 @@ describe("wordpress_site_tool_call — relocated content-review trigger (cinatra
     const handlers = createWordPressPrimitiveHandlers();
     await expect(
       call({ toolName: "ewpa/update-post", args: { title: "New title" }, instanceId: "site-1" }, handlers),
-    ).rejects.toThrow(/positive numeric "post_id"/);
+    ).rejects.toThrow(/positive integer "post_id"/);
     expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a non-integer "post_id" (e.g. "42.5") before any capture — Number.isInteger, not bare Number()', async () => {
+    registerStubDeps({ cmsReview: makeSeam() });
+    routeMcpByTool();
+    const handlers = createWordPressPrimitiveHandlers();
+    await expect(
+      call({ toolName: "ewpa/update-post", args: { post_id: "42.5", title: "New title" }, instanceId: "site-1" }, handlers),
+    ).rejects.toThrow(/positive integer "post_id"/);
+    await expect(
+      call({ toolName: "ewpa/update-post", args: { post_id: 42.5, title: "New title" }, instanceId: "site-1" }, handlers),
+    ).rejects.toThrow(/positive integer "post_id"/);
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  it('accepts an exponential-but-integral "post_id" (e.g. "1e2") — the same coercion the dedicated tool\'s z.coerce.number().int() allows', async () => {
+    registerStubDeps({}); // fence off — no cmsReview, so the write forwards straight through
+    routeMcpByTool();
+    const handlers = createWordPressPrimitiveHandlers();
+    await call({ toolName: "ewpa/update-post", args: { post_id: "1e2", title: "New title" }, instanceId: "site-1" }, handlers);
+    const updateCalls = invokeSiteToolMock.mock.calls.filter((c) => c[0].toolName === "ewpa/update-post");
+    expect(updateCalls).toHaveLength(1);
+  });
+
+  // CodeRabbit-adopted hardening: an unreviewed field must not ride an
+  // unchanged-title "pass" verdict onto WordPress unreviewed.
+  it("rejects a field outside the content-review scope on the pass path", async () => {
+    registerStubDeps({ cmsReview: makeSeam() });
+    routeMcpByTool();
+    const handlers = createWordPressPrimitiveHandlers();
+    // "Old title" matches routeMcpByTool's current title exactly, so if this
+    // were allowed through, changedPaths would be empty and the write would
+    // ride a no-gate `pass` verdict — carrying the unreviewed "slug" with it.
+    await expect(
+      call(
+        { toolName: "ewpa/update-post", args: { post_id: 42, title: "Old title", slug: "sneaky" }, instanceId: "site-1" },
+        handlers,
+      ),
+    ).rejects.toThrow(/outside the content-review scope/);
+    const updateCalls = invokeSiteToolMock.mock.calls.filter((c) => c[0].toolName === "ewpa/update-post");
+    expect(updateCalls).toHaveLength(0);
+  });
+
+  it("gates the write with requireWriteAuthority BEFORE the review capture/write (parity with wordpress_post_update's own gate)", async () => {
+    registerStubDeps({ cmsReview: makeSeam() });
+    routeMcpByTool();
+    const handlers = createWordPressPrimitiveHandlers();
+    await call(
+      { toolName: "ewpa/update-post", args: { post_id: 42, title: "New title" }, instanceId: "site-1" },
+      handlers,
+    );
+    expect(requireInstanceWriteAuthorityMock).toHaveBeenCalledWith({
+      instanceId: "site-1",
+      primitiveName: "wordpress_site_tool_call",
+    });
+    expect(requireInstanceWriteAuthorityMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("DENIED write authority -> throws and NEVER reaches WordPress (parity: the write is refused exactly as wordpress_post_update refuses)", async () => {
+    requireInstanceWriteAuthorityMock.mockRejectedValueOnce(new Error("write denied: no use right"));
+    registerStubDeps({ cmsReview: makeSeam() });
+    routeMcpByTool();
+    const handlers = createWordPressPrimitiveHandlers();
+    await expect(
+      call({ toolName: "ewpa/update-post", args: { post_id: 42, title: "New title" }, instanceId: "site-1" }, handlers),
+    ).rejects.toThrow(/denied/i);
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  it("a transient post-apply read-back failure does not mask a successful write as a failure (reread failure ≠ write failure)", async () => {
+    const seam = makeSeam({
+      resolveDisposition: vi.fn(async () => ({ disposition: "approved" as const, gate: { gateId: "gate-1", runId: "run-1" } })),
+    });
+    registerStubDeps({ cmsReview: seam });
+    let getPostCalls = 0;
+    invokeSiteToolMock.mockImplementation(async (input: { toolName: string; args: Record<string, unknown> }) => {
+      if (input.toolName === "ewpa/get-post") {
+        getPostCalls += 1;
+        // First call: evaluateStagedContentWrite's fetchCurrent (pre-write) — succeeds.
+        if (getPostCalls === 1) {
+          return {
+            success: true,
+            data: { ID: 42, post_status: "publish", post_title: "Old title", post_content: "<p>Old body</p>", post_excerpt: "old" },
+          };
+        }
+        // Second call: the post-apply read-back — a transient MCP failure.
+        throw new Error("transient MCP failure");
+      }
+      if (input.toolName === "ewpa/update-post") {
+        return { success: true, data: { post_id: input.args.post_id, message: "Post updated successfully." } };
+      }
+      return { ok: true, toolName: input.toolName };
+    });
+    const handlers = createWordPressPrimitiveHandlers();
+    const res = (await call(
+      { toolName: "ewpa/update-post", args: { post_id: 42, title: "New title" }, instanceId: "site-1" },
+      handlers,
+    )) as Record<string, unknown>;
+    // The write itself landed and the caller does NOT see a thrown error.
+    const updateCalls = invokeSiteToolMock.mock.calls.filter((c) => c[0].toolName === "ewpa/update-post");
+    expect(updateCalls).toHaveLength(1);
+    // The failed reread is recorded as an unverified read-back — never a
+    // fabricated "verified" outcome, and never a call to recordApplyVerification
+    // (there is no re-read content to verify against).
+    expect(seam.recordApplyVerification).not.toHaveBeenCalled();
+    expect((res as any).review).toMatchObject({ ok: false, code: "readback-unavailable" });
   });
 
   it("a NON-target ability is unaffected — forwards straight through with no review-trigger logic", async () => {
