@@ -462,7 +462,9 @@ async function updatePostViaMcp(input: {
   // `cinatra-post-update`) covers title/content/excerpt/status only — NOT
   // `meta`. Rather than silently drop a requested change, fail closed and
   // route the caller to the dedicated meta primitive
-  // (`wordpress_post_update_meta` stays on its REST carve-out).
+  // (`wordpress_post_update_meta` stays on its REST carve-out). DEFENSIVE
+  // BACKSTOP: the `wordpress_post_update` handler above already rejects this
+  // pre-gate; this repeats the check for `updatePostViaMcp`'s own callers.
   if (input.fields.meta !== undefined) {
     throw new Error(
       "wordpress_post_update cannot write post meta over the MCP content server — " +
@@ -483,6 +485,7 @@ async function updatePostViaMcp(input: {
 
   // Guard against dispatching an update with no editable field left after
   // stripping (the ability would reject it anyway; surface it precisely).
+  // DEFENSIVE BACKSTOP: the handler above already rejects this pre-gate.
   const editableKeys = Object.keys(args).filter((k) => k !== "post_id");
   if (editableKeys.length === 0) {
     throw new Error("No editable fields to update (title/content/excerpt/status).");
@@ -694,8 +697,13 @@ export function createWordPressPrimitiveHandlers() {
     // Page discovery. Mirrors wordpress_posts_list exactly (same cursor
     // pagination + metadata-only projection) but lists pages through the plugin's
     // cinatra-posts-list tool with postType:"page". Lets an external MCP caller
-    // find a WordPress page, then read or update it with wordpress_post_get /
-    // wordpress_post_update passing postType: "page".
+    // find a WordPress page, then read its status or content with
+    // wordpress_post_status / wordpress_post_get passing postType: "page" (both
+    // proven to support pages), or delete it with wordpress_post_delete. NOT
+    // wordpress_post_update — the governed-invoker retarget (cinatra-ai/
+    // cinatra#2022) fails closed on postType:"page" for updates specifically
+    // (no proven/distinct ewpa update-a-page ability exists yet; see that
+    // handler's own comment) — page editing has no supported primitive today.
     "wordpress_pages_list": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const { instanceId, cursor } = postsListSchema.parse(request.input);
       const instances = listInstancesSorted();
@@ -779,6 +787,29 @@ export function createWordPressPrimitiveHandlers() {
     // carve-out (the ability does not cover post meta).
     "wordpress_post_update": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const input = postUpdateSchema.parse(request.input);
+      // CodeRabbit-adopted hardening: fail closed on an input `updatePostViaMcp`
+      // could never apply BEFORE the review gate below captures anything — same
+      // reason the postType checks further down are hoisted pre-gate. Without
+      // this, a request that mixes a real field change (e.g. `title`) with
+      // `meta`, or that reduces to no editable field, can get captured and HELD
+      // for human review, then fail permanently at apply time — stranding an
+      // APPROVED-but-inapplicable review and wasting the reviewer's decision.
+      // The matching checks stay in `updatePostViaMcp` too as a defensive
+      // backstop (it has no other caller today, but the redundancy is cheap).
+      if (input.meta !== undefined) {
+        throw new Error(
+          "wordpress_post_update cannot write post meta over the MCP content server — " +
+            "use wordpress_post_update_meta for meta writes.",
+        );
+      }
+      const hasEditableField =
+        typeof input.title === "string" ||
+        (typeof input.content === "string" && input.content.length > 0) ||
+        (typeof input.excerpt === "string" && input.excerpt.length > 0) ||
+        typeof input.status === "string";
+      if (!hasEditableField) {
+        throw new Error("No editable fields to update (title/content/excerpt/status).");
+      }
       const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === input.instanceId);
       if (!instance) throw new Error("WordPress instance not found.");

@@ -47,7 +47,7 @@ const TOOL_META: Record<string, { description: string; inputSchema: z.ZodTypeAny
   },
   "wordpress_pages_list": {
     description:
-      "List recently published pages from a WordPress instance (the /wp/v2/pages collection), ordered newest first. Returns metadata-only items (id, title, status, date, url) — no rendered HTML body or excerpt. Use this to discover a page id, then read, update, check the status of, or delete it with wordpress_post_get / wordpress_post_update / wordpress_post_status / wordpress_post_delete passing postType: \"page\". If nextCursor is present, call again with cursor=<nextCursor> to retrieve the next page.",
+      "List recently published pages from a WordPress instance (the /wp/v2/pages collection), ordered newest first. Returns metadata-only items (id, title, status, date, url) — no rendered HTML body or excerpt. Use this to discover a page id, then read it with wordpress_post_get, check its status with wordpress_post_status, or delete it with wordpress_post_delete, passing postType: \"page\". wordpress_post_update does NOT support postType: \"page\" (it fails closed) — page editing has no supported primitive yet. If nextCursor is present, call again with cursor=<nextCursor> to retrieve the next page.",
     inputSchema: postsListSchema,
   },
   "wordpress_post_get_latest": {
