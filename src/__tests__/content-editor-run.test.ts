@@ -7,8 +7,13 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 // last-agent reply TEXT. This file tests the CONNECTOR-side consumption of that
 // text (code-fence-strip + JSON.parse + graceful fallback). The host owns the
 // history-walk + role-acceptance contract and tests it host-side.
+//
+// cinatra-ai/cinatra#2022 S7: `wordpress_content_editor_run` was extracted
+// into its own relay-only module (`mcp/relay.ts`) — this suite now calls
+// `runContentEditorRelay` directly instead of going through
+// `createWordPressPrimitiveHandlers()`, which no longer carries this key.
 
-import { createWordPressPrimitiveHandlers } from "@cinatra-ai/wordpress-mcp-connector/mcp-handlers";
+import { runContentEditorRelay } from "@cinatra-ai/wordpress-mcp-connector/mcp-relay";
 import {
   registerWordPressConnector,
   _resetWordPressDepsForTests,
@@ -47,12 +52,9 @@ function registerStubDeps() {
 }
 
 describe("wordpress_content_editor_run — dispatch-reply handling", () => {
-  let handlers: ReturnType<typeof createWordPressPrimitiveHandlers>;
-
   beforeEach(() => {
     _resetWordPressDepsForTests();
     registerStubDeps();
-    handlers = createWordPressPrimitiveHandlers();
     dispatchContentEditorMock.mockReset();
     dispatchContentEditorMock.mockResolvedValue("");
   });
@@ -61,7 +63,7 @@ describe("wordpress_content_editor_run — dispatch-reply handling", () => {
     dispatchContentEditorMock.mockResolvedValue(
       '{"postId":"14","changes":[{"field":"title","before":"old","after":"new"}]}',
     );
-    const result = await (handlers as any).wordpress_content_editor_run({
+    const result = await runContentEditorRelay({
       primitiveName: "wordpress_content_editor_run",
       input: { instanceId: "site-1", postId: 14, instructions: "Update title" },
       actor: { actorType: "model", source: "agent" },
@@ -75,7 +77,7 @@ describe("wordpress_content_editor_run — dispatch-reply handling", () => {
 
   it("Test 2: empty dispatch reply (no agent message host-side) → fallback { result: '' }", async () => {
     dispatchContentEditorMock.mockResolvedValue("");
-    const result = await (handlers as any).wordpress_content_editor_run({
+    const result = await runContentEditorRelay({
       primitiveName: "wordpress_content_editor_run",
       input: { instanceId: "site-1", postId: 14, instructions: "x" },
       actor: { actorType: "model", source: "agent" },
@@ -86,7 +88,7 @@ describe("wordpress_content_editor_run — dispatch-reply handling", () => {
 
   it("Test 3: code-fenced JSON reply → stripCodeFences + parse OK", async () => {
     dispatchContentEditorMock.mockResolvedValue('```json\n{"postId":"14","changes":[]}\n```');
-    const result = await (handlers as any).wordpress_content_editor_run({
+    const result = await runContentEditorRelay({
       primitiveName: "wordpress_content_editor_run",
       input: { instanceId: "site-1", postId: 14, instructions: "x" },
       actor: { actorType: "model", source: "agent" },
@@ -97,7 +99,7 @@ describe("wordpress_content_editor_run — dispatch-reply handling", () => {
 
   it("Test 4: non-JSON prose reply → returns { result: <text> }", async () => {
     dispatchContentEditorMock.mockResolvedValue("Edit complete.");
-    const result = await (handlers as any).wordpress_content_editor_run({
+    const result = await runContentEditorRelay({
       primitiveName: "wordpress_content_editor_run",
       input: { instanceId: "site-1", postId: 14, instructions: "x" },
       actor: { actorType: "model", source: "agent" },
@@ -108,7 +110,7 @@ describe("wordpress_content_editor_run — dispatch-reply handling", () => {
 
   it("Test 5: forwards the validated input as the dispatch payload", async () => {
     dispatchContentEditorMock.mockResolvedValue('{"postId":"42","changes":[]}');
-    await (handlers as any).wordpress_content_editor_run({
+    await runContentEditorRelay({
       primitiveName: "wordpress_content_editor_run",
       input: { instanceId: "site-1", postId: 42, instructions: "x" },
       actor: { actorType: "model", source: "agent" },

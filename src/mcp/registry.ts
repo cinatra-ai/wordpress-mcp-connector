@@ -7,7 +7,6 @@ import {
   postStatusSchema,
   uploadMediaSchema,
   updateMetaSchema,
-  contentEditorRunSchema,
   postUpdateSchema,
   siteToolCallSchema,
   siteToolsListSchema,
@@ -69,11 +68,11 @@ const TOOL_META: Record<string, { description: string; inputSchema: z.ZodTypeAny
       "Update a WordPress post's top-level fields (title, content, excerpt, status). Applies the provided fields to the post through the site's MCP content server (the in-admin editing path), not a direct REST call. Used by the wordpress-content-editor agent's demote-then-edit pattern: passing { status: 'draft', title, content } in one call demotes a published post AND applies edits, leaving the previous live revision in WordPress's revision history. Requires at least one editable field (title/content/excerpt/status). Returns { id, status, title, content, excerpt, adminUrl }. For post meta updates, use wordpress_post_update_meta.",
     inputSchema: postUpdateSchema,
   },
-  "wordpress_content_editor_run": {
-    description:
-      "Edit a WordPress post using natural language instructions. Dispatches to the wordpress-content-editor WayFlow agent. Note: WordPress lacks a true draft-revision primitive, so when postStatus is 'publish' the agent uses a demote-then-edit pattern via wordpress_post_update with status:draft — the live revision is preserved in WordPress's revision history but the front-of-site copy becomes a draft until re-published. Provide instanceId, postId, instructions. Optional: postType, postStatus. Returns { postId, changes: [{ field, before, after }] } or { result: <text> }.",
-    inputSchema: contentEditorRunSchema,
-  },
+  // `wordpress_content_editor_run` is NOT registered here. cinatra-ai/cinatra
+  // #2022 S7 extracted it into its own relay-only module (`./relay`) — see
+  // the `registerWordPressPrimitives` loop below for why that keeps it off
+  // tools/list (cinatra#246).
+
   // cinatra#2017 S2 — governed connector-instance invoker (Plane C). Registered
   // + classified + wired, but DARK in S2 (delegated deny-by-default + no
   // agent-run allowlist keep them off every live model surface; S7 cuts over).
@@ -92,15 +91,17 @@ const TOOL_META: Record<string, { description: string; inputSchema: z.ZodTypeAny
 export function registerWordPressPrimitives(server: ExtensionMcpToolServer) {
   const handlers = createWordPressPrimitiveHandlers();
 
+  // cinatra#246: the content-editor RELAY (`wordpress_content_editor_run`,
+  // `../mcp/relay.ts`) is a dispatch primitive (it sends an A2A task to the
+  // wordpress-content-editor agent), not a CMS read/write capability, and
+  // must NEVER be exposed as a model-visible MCP tool — when the leaf agent
+  // has the cinatra MCP server injected it would otherwise see the name in
+  // tools/list and call it, re-dispatching itself (observed: recursive
+  // mcp_call -> 504). It is deliberately never part of `handlers` above (S7
+  // extracted it into its own module precisely so this loop cannot
+  // accidentally register it); callers import `runContentEditorRelay`
+  // directly instead.
   for (const [name, handler] of Object.entries(handlers)) {
-    // cinatra#246: NEVER expose the content-editor RELAY as an MCP tool. It is
-    // a dispatch primitive (it sends an A2A task to the wordpress-content-editor
-    // agent), not a CMS read/write capability. When the leaf agent has the
-    // cinatra MCP server injected it would otherwise see `wordpress_content_editor_run`
-    // in tools/list and call it — re-dispatching itself (observed: recursive
-    // mcp_call -> 504). The host relays to the agent directly via
-    // dispatchContentEditorViaA2A; this name must not be a model-visible tool.
-    if (name === "wordpress_content_editor_run") continue;
     const meta = TOOL_META[name] ?? { description: name, inputSchema: z.object({}).passthrough() };
     server.registerTool(
       name,

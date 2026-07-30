@@ -13,6 +13,12 @@ export default defineConfig({
         find: "@cinatra-ai/wordpress-mcp-connector/mcp-handlers",
         replacement: path.join(__dirname, "src/mcp/handlers.ts"),
       },
+      // @cinatra-ai/wordpress-mcp-connector/mcp-relay — resolve to real source
+      // (cinatra-ai/cinatra#2022 S7 — the content-editor relay's own module)
+      {
+        find: "@cinatra-ai/wordpress-mcp-connector/mcp-relay",
+        replacement: path.join(__dirname, "src/mcp/relay.ts"),
+      },
       // @cinatra-ai/wordpress-mcp-connector/widget-chat-tool — resolve to real source (test in same package)
       {
         find: "@cinatra-ai/wordpress-mcp-connector/widget-chat-tool",
