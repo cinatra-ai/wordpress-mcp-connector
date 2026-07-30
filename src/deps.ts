@@ -651,15 +651,28 @@ export interface WordPressConnectorDeps {
   }) => Promise<unknown>;
   // ---- per-user write-authority gate (cinatra#409; host-bound) ----
   /**
-   * WRITE AUTHZ — per-user / per-connector-instance entitlement gate. EVERY
-   * WordPress write surface (the external-MCP toolbox's per-instance
-   * credentialed-tool injection today; formerly also the now-deleted
-   * per-operation write primitives — `wordpress_post_update`,
-   * `wordpress_post_update_meta`, `wordpress_post_create_draft`,
-   * `wordpress_post_delete`, `wordpress_media_upload` — removed under
-   * cinatra-ai/cinatra#2022 PR-θ) MUST `await` this BEFORE dispatching the
-   * write / injection. It THROWS on deny; resolving without throwing is the
-   * only "allow".
+   * WRITE AUTHZ — per-user / per-connector-instance entitlement gate. Despite
+   * the name, its two current live callers are NOT both writes: (a)
+   * `wordpress_site_tool_call`'s review-gated `ewpa/update-post` path only
+   * (`handlers.ts`'s `callReviewGatedSiteTool`) — a genuine WordPress content
+   * write; and (b) the external-MCP toolbox's per-instance
+   * credentialed-tool-injection eligibility check (`toolbox.ts`) — that
+   * injection is TRUSTED-READ-ONLY (verified reads only; writes always stay
+   * on the governed invoker, see the trusted-site-mode CHANGELOG entries),
+   * and reuses this SAME per-instance `use`-authority gate purely to decide
+   * whether an actor may have that site's credentials injected at all, not
+   * because the injection is itself a write. Every OTHER ability reachable
+   * through `wordpress_site_tool_call` delegates its authorization to the
+   * host's own governed connector-instance invoker
+   * (`@cinatra-ai/host:connector-instance-invoker`) instead of this
+   * connector-level gate — this dep is NOT awaited on that path. Formerly
+   * also awaited by the now-deleted per-operation write primitives —
+   * `wordpress_post_update`, `wordpress_post_update_meta`,
+   * `wordpress_post_create_draft`, `wordpress_post_delete`,
+   * `wordpress_media_upload` — removed under cinatra-ai/cinatra#2022 PR-θ.
+   * Both current callers `await` this BEFORE dispatching their write /
+   * injection. It THROWS on deny; resolving without throwing is the only
+   * "allow".
    *
    * Host-side the impl: (a) resolves the trusted actor from the active MCP
    * request frame (`resolveExtensionActorContext()` / `resolveExtensionActorSummary()`

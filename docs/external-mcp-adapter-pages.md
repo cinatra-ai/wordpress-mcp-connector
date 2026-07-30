@@ -2,10 +2,17 @@
 
 Cinatra can inject a public WordPress site's **external MCP adapter**
 (`WordPress/mcp-adapter`, which depends on `WordPress/abilities-api`) as an
-external MCP server, so an LLM provider can talk to the site directly. Because
-the adapter's tool set is version-dependent, the connector injects it with
-`allowedTools: null` and `requireApproval: "read-only"` rather than a static,
-possibly-wrong tool allowlist.
+external MCP server, so an LLM provider can talk to the site directly — but
+only under the **trusted-site mode** contract (cinatra-ai/cinatra#2019 S4):
+the assembling surface must be workspace chat, the instance needs a current
+per-instance opt-in with its consent acknowledgement unchanged since, the
+catalog must verify, and the host's descriptor-verified read set for that
+instance must be non-empty. Because the adapter's tool set is
+version-dependent, every injected entry carries EXACTLY that host-granted
+read-tool allowlist — the old full-catalog `allowedTools: null` form is
+unrepresentable — with `approval: "auto_execute"` rather than a per-call
+`requireApproval: "read-only"` prompt. Writes are never injected this way;
+they always stay on the governed connector-instance invoker.
 
 This note records what that adapter actually exposes for **pages**, and the
 supported path for callers working from outside Cinatra.
@@ -90,6 +97,14 @@ For Cinatra to inject a site's adapter at all, every one of these must hold:
 4. **Cinatra instance authorization** — the acting user must hold `use`
    authority on that connector instance; the host resolves the trusted actor
    from the MCP request frame and fails closed otherwise.
+5. **Trusted-site mode granted** — the assembling chat surface must be
+   workspace chat (agent-run/public-widget/session surfaces never inject),
+   the instance needs a current per-instance opt-in with its consent
+   acknowledgement unchanged since, the catalog must verify, and the host's
+   descriptor-verified read-tool set for that instance must be non-empty
+   (cinatra-ai/cinatra#2019 S4). On today's community-plugin stack that
+   verified set is empty by capture, so even an otherwise-eligible,
+   fully-opted-in site injects nothing yet.
 
 ## Troubleshooting
 

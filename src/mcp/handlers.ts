@@ -384,11 +384,20 @@ async function callReviewGatedSiteTool(
   // Mirror the dedicated tool's own pre-gate hardening exactly: meta is not
   // covered by this ability, and a request with no editable field would
   // strand an APPROVED-but-inapplicable review at apply time. Fail BEFORE
-  // any capture, not after.
+  // any capture, not after. `wordpress_post_update_meta` no longer exists
+  // (cinatra-ai/cinatra#2022 S7, PR-θ) — meta writes are NOT unsupported,
+  // they simply live on a different ability than this review-gated one:
+  // the site's own catalog exposes `ewpa/update-post-meta` separately from
+  // `ewpa/update-post` (evidenced by the pinned-fixture S1 VERIFY capture,
+  // see `callEwpaAbility`'s doc comment above), so a caller reaches it by
+  // invoking `wordpress_site_tool_call` again with that `toolName` directly
+  // (list via `wordpress_site_tools_list` first) — not by folding `meta`
+  // into this ability's reviewed title/content/excerpt/status payload.
   if (args.meta !== undefined) {
     throw new Error(
       `wordpress_site_tool_call: "${input.toolName}" cannot write post meta through the governed connector-instance ` +
-        "invoker — use wordpress_post_update_meta for meta writes.",
+        'invoker — call wordpress_site_tool_call again with toolName "ewpa/update-post-meta" (list the catalog via ' +
+        "wordpress_site_tools_list first) for meta writes.",
     );
   }
 
