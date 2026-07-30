@@ -18,7 +18,12 @@ import { Buffer } from "node:buffer";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { createWordPressClient, WORDPRESS_API_CAPTURE_CHANNEL } from "../lib/wordpress-client";
+import {
+  createWordPressClient,
+  WORDPRESS_API_CAPTURE_CHANNEL,
+  REMOTE_ASSIST_CATALOG_PLUGIN_SLUG,
+} from "../lib/wordpress-client";
+import { REMOTE_ASSIST_CATALOG_PLUGIN_SLUG as DEPS_CATALOG_PLUGIN_SLUG } from "../deps";
 
 type ProviderMap = Record<string, unknown>;
 
@@ -530,5 +535,206 @@ describe("persistLocalDevWordPressInstanceUnvalidated — loopback hard-gate", (
       binding: { orgId: undefined, runBy: undefined },
     });
     expect(client.readWordPressInstanceById(row.id)?.username).toBe("dev");
+  });
+});
+
+// cinatra#2021 S6/delta — remote-assist catalog-plugin install. WordPress's
+// OWN `install_plugins` REST capability check on the connected site is the
+// SOLE authority on whether this succeeds; these tests attack the
+// escalation / confused-deputy legs directly: can the call ever be pointed
+// at a different plugin, escalate past a 403 by retrying/reauthenticating,
+// or request an active install that would additionally need
+// `activate_plugins`?
+describe("installCatalogPluginRemote — REST-403-is-the-authority, no escalation path", () => {
+  it("pin drift guard: the connector-client slug and the deps.ts slug never diverge", () => {
+    expect(REMOTE_ASSIST_CATALOG_PLUGIN_SLUG).toBe(DEPS_CATALOG_PLUGIN_SLUG);
+    expect(REMOTE_ASSIST_CATALOG_PLUGIN_SLUG).toBe("enable-abilities-for-mcp");
+  });
+
+  it("happy path: installs INACTIVE via the SAME Nango Basic-auth path as every other writer, gated + captured identically", async () => {
+    const config = buildConfigStore({ wordpress: { instances: [INSTANCE] } });
+    const nango = buildNango();
+    const gate = buildGate();
+    const { ctx, capture } = buildCtx({
+      "@cinatra-ai/host:connector-config": config.impl,
+      "nango-system": nango,
+      "@cinatra-ai/host:instance-connection-gate": gate,
+    });
+    const client = createWordPressClient(ctx);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(
+        { plugin: "enable-abilities-for-mcp/enable-abilities-for-mcp.php", status: "inactive" },
+        { status: 201 },
+      ),
+    );
+
+    const result = await client.installCatalogPluginRemote("inst-1");
+
+    // Same use-gate + credential-resolution posture as every other writer —
+    // "no new credential handling" is a hard invariant, not a description.
+    expect(gate.enforceInstanceConnectionUse).toHaveBeenCalledWith({
+      connectorKey: "wordpress",
+      connectionId: "inst-1",
+      binding: { orgId: "org-1", runBy: "user-1" },
+      source: "wordpress-api",
+    });
+    expect(nango.getNangoCredentials).toHaveBeenCalledWith("cinatra-wordpress", "inst-1");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://site.example/index.php?rest_route=%2Fwp%2Fv2%2Fplugins");
+    expect(init.method).toBe("POST");
+    expect((init.headers as Record<string, string>).Authorization).toBe(
+      `Basic ${Buffer.from("wp-admin:app-pass-1").toString("base64")}`,
+    );
+    // The ONLY body this call can ever send: the hardcoded catalog slug,
+    // requesting INACTIVE (never active — activation stays a separate,
+    // explicit, site-admin step, and requesting active would additionally
+    // require activate_plugins, which this action must never need).
+    expect(JSON.parse(init.body as string)).toEqual({
+      slug: "enable-abilities-for-mcp",
+      status: "inactive",
+    });
+
+    expect(result).toEqual({
+      outcome: "installed",
+      status: 201,
+      plugin: "enable-abilities-for-mcp/enable-abilities-for-mcp.php",
+    });
+
+    expect(capture).toHaveBeenCalledWith(
+      WORDPRESS_API_CAPTURE_CHANNEL,
+      expect.objectContaining({ label: "wordpress-install-catalog-plugin-remote", kind: "request" }),
+    );
+    expect(capture).toHaveBeenCalledWith(
+      WORDPRESS_API_CAPTURE_CHANNEL,
+      expect.objectContaining({ label: "wordpress-install-catalog-plugin-remote", kind: "response" }),
+    );
+    for (const call of capture.mock.calls as unknown[][]) {
+      expect(JSON.stringify(call)).not.toContain("app-pass-1");
+    }
+  });
+
+  it("a REST 403 (WordPress's own install_plugins denial) surfaces as `forbidden` — never retried, never a different outcome", async () => {
+    const config = buildConfigStore({ wordpress: { instances: [INSTANCE] } });
+    const { ctx } = buildCtx({
+      "@cinatra-ai/host:connector-config": config.impl,
+      "nango-system": buildNango(),
+      "@cinatra-ai/host:instance-connection-gate": buildGate(),
+    });
+    const client = createWordPressClient(ctx);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(
+        { code: "rest_cannot_manage_plugins", message: "Sorry, you are not allowed to manage plugins for this site." },
+        { status: 403 },
+      ),
+    );
+
+    const result = await client.installCatalogPluginRemote("inst-1");
+
+    expect(result).toEqual({ outcome: "forbidden", status: 403 });
+    // Exactly ONE request — a 403 is never retried, and never triggers a
+    // second attempt under a different credential (there is no "as someone
+    // else" path anywhere in this client).
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("a non-403 WordPress error surfaces the REST response VERBATIM, never invented copy", async () => {
+    const config = buildConfigStore({ wordpress: { instances: [INSTANCE] } });
+    const { ctx } = buildCtx({
+      "@cinatra-ai/host:connector-config": config.impl,
+      "nango-system": buildNango(),
+      "@cinatra-ai/host:instance-connection-gate": buildGate(),
+    });
+    const client = createWordPressClient(ctx);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ code: "rest_plugin_not_found", message: "Plugin not found in the WordPress.org plugin directory." }, { status: 404 }),
+    );
+
+    const result = await client.installCatalogPluginRemote("inst-1");
+
+    expect(result).toEqual({
+      outcome: "error",
+      status: 404,
+      wpCode: "rest_plugin_not_found",
+      wpMessage: "Plugin not found in the WordPress.org plugin directory.",
+    });
+  });
+
+  it("an unknown instance id resolves a typed error WITHOUT ever calling fetch (no credential to resolve)", async () => {
+    const config = buildConfigStore({ wordpress: { instances: [INSTANCE] } });
+    const { ctx } = buildCtx({
+      "@cinatra-ai/host:connector-config": config.impl,
+      "nango-system": buildNango(),
+      "@cinatra-ai/host:instance-connection-gate": buildGate(),
+    });
+    const client = createWordPressClient(ctx);
+
+    const result = await client.installCatalogPluginRemote("does-not-exist");
+
+    expect(result.outcome).toBe("error");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("a use-gate DENY resolves a typed error (fail-closed) rather than an uncaught rejection", async () => {
+    const config = buildConfigStore({ wordpress: { instances: [INSTANCE] } });
+    const gate = buildGate({
+      enforceInstanceConnectionUse: vi.fn(async () => {
+        throw new Error("connection use denied");
+      }),
+    });
+    const { ctx } = buildCtx({
+      "@cinatra-ai/host:connector-config": config.impl,
+      "nango-system": buildNango(),
+      "@cinatra-ai/host:instance-connection-gate": gate,
+    });
+    const client = createWordPressClient(ctx);
+
+    const result = await client.installCatalogPluginRemote("inst-1");
+
+    expect(result).toEqual({ outcome: "error", status: 0, wpMessage: "connection use denied" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("a network/transport failure resolves a typed error instead of throwing", async () => {
+    const config = buildConfigStore({ wordpress: { instances: [INSTANCE] } });
+    const { ctx } = buildCtx({
+      "@cinatra-ai/host:connector-config": config.impl,
+      "nango-system": buildNango(),
+      "@cinatra-ai/host:instance-connection-gate": buildGate(),
+    });
+    const client = createWordPressClient(ctx);
+    fetchMock.mockRejectedValueOnce(new Error("fetch failed: ECONNREFUSED"));
+
+    const result = await client.installCatalogPluginRemote("inst-1");
+
+    expect(result).toEqual({ outcome: "error", status: 0, wpMessage: "fetch failed: ECONNREFUSED" });
+  });
+
+  it("a FAILING audit capture never changes the install outcome (no-throw audit wrapper)", async () => {
+    const config = buildConfigStore({ wordpress: { instances: [INSTANCE] } });
+    const { ctx, capture } = buildCtx({
+      "@cinatra-ai/host:connector-config": config.impl,
+      "nango-system": buildNango(),
+      "@cinatra-ai/host:instance-connection-gate": buildGate(),
+    });
+    // The host capture surface rejecting must be invisible to the caller —
+    // an audit failure after WordPress already responded must not turn a
+    // real install result into an uncaught rejection.
+    capture.mockRejectedValue(new Error("capture backend down"));
+    const client = createWordPressClient(ctx);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(
+        { plugin: "enable-abilities-for-mcp/enable-abilities-for-mcp.php", status: "inactive" },
+        { status: 201 },
+      ),
+    );
+
+    const result = await client.installCatalogPluginRemote("inst-1");
+
+    expect(result).toEqual({
+      outcome: "installed",
+      status: 201,
+      plugin: "enable-abilities-for-mcp/enable-abilities-for-mcp.php",
+    });
   });
 });

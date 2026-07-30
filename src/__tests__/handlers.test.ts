@@ -1,6 +1,10 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 import { createWordPressPrimitiveHandlers } from "@cinatra-ai/wordpress-mcp-connector/mcp-handlers";
+// cinatra-ai/cinatra#2022 S7: `wordpress_content_editor_run` was extracted
+// into its own relay-only module (`mcp/relay.ts`, cinatra#246) — it is no
+// longer a key on `createWordPressPrimitiveHandlers()`'s returned object.
+import { runContentEditorRelay } from "@cinatra-ai/wordpress-mcp-connector/mcp-relay";
 import {
   registerWordPressConnector,
   _resetWordPressDepsForTests,
@@ -164,13 +168,20 @@ describe("wordpress_content_editor_run", () => {
     dispatchContentEditorMock.mockResolvedValue("{}");
   });
 
-  it("is registered as a handler key on createWordPressPrimitiveHandlers()", () => {
-    expect(typeof (handlers as any).wordpress_content_editor_run).toBe("function");
+  // cinatra#246 / cinatra-ai/cinatra#2022 S7: the content-editor RELAY is a
+  // dispatch primitive, deliberately never a model-visible MCP tool — it was
+  // extracted into its own module (`mcp/relay.ts`) precisely so it can never
+  // be a key on this handlers object (previously enforced by a skip-by-name
+  // check in registry.ts's registration loop; now structural). Every other
+  // test below calls `runContentEditorRelay` directly.
+  it("is NOT a handler key on createWordPressPrimitiveHandlers() — lives in mcp/relay.ts instead", () => {
+    expect((handlers as any).wordpress_content_editor_run).toBeUndefined();
+    expect(typeof runContentEditorRelay).toBe("function");
   });
 
   it("rejects empty postId via zod schema", async () => {
     await expect(
-      (handlers as any).wordpress_content_editor_run({
+      runContentEditorRelay({
         primitiveName: "wordpress_content_editor_run",
         input: { instanceId: "site-1", postId: "", instructions: "edit" },
         actor: { actorType: "model", source: "agent" },
@@ -180,7 +191,7 @@ describe("wordpress_content_editor_run", () => {
   });
 
   it("coerces string postId to number via Zod coerce in the dispatched payload", async () => {
-    await (handlers as any).wordpress_content_editor_run({
+    await runContentEditorRelay({
       primitiveName: "wordpress_content_editor_run",
       input: { instanceId: "site-1", postId: "10", instructions: "edit" },  // string
       actor: { actorType: "model", source: "agent" },
@@ -193,7 +204,7 @@ describe("wordpress_content_editor_run", () => {
   });
 
   it("dispatches via deps.dispatchContentEditor with default :3010 agent route and timeout 300_000", async () => {
-    await (handlers as any).wordpress_content_editor_run({
+    await runContentEditorRelay({
       primitiveName: "wordpress_content_editor_run",
       input: {
         instanceId: "site-1",
@@ -222,7 +233,7 @@ describe("wordpress_content_editor_run", () => {
     registerStubDeps({
       resolveContentEditorAgentUrl: async () => "http://wayflow-wordpress-content-editor:3021",
     });
-    await (handlers as any).wordpress_content_editor_run({
+    await runContentEditorRelay({
       primitiveName: "wordpress_content_editor_run",
       input: { instanceId: "site-1", postId: 10, instructions: "edit" },
       actor: { actorType: "model", source: "agent" },
@@ -237,7 +248,7 @@ describe("wordpress_content_editor_run", () => {
     dispatchContentEditorMock.mockResolvedValue(
       '{"postId":"10","changes":[{"field":"title","before":"Old","after":"New"}]}',
     );
-    const result = await (handlers as any).wordpress_content_editor_run({
+    const result = await runContentEditorRelay({
       primitiveName: "wordpress_content_editor_run",
       input: { instanceId: "site-1", postId: 10, instructions: "x" },
       actor: { actorType: "model", source: "agent" },
@@ -251,7 +262,7 @@ describe("wordpress_content_editor_run", () => {
 
   it("strips Markdown code fences before JSON.parse", async () => {
     dispatchContentEditorMock.mockResolvedValue('```json\n{"postId":"10","changes":[]}\n```');
-    const result = await (handlers as any).wordpress_content_editor_run({
+    const result = await runContentEditorRelay({
       primitiveName: "wordpress_content_editor_run",
       input: { instanceId: "site-1", postId: 10, instructions: "x" },
       actor: { actorType: "model", source: "agent" },
@@ -262,7 +273,7 @@ describe("wordpress_content_editor_run", () => {
 
   it("falls back to { result: text } when the dispatch reply is not JSON", async () => {
     dispatchContentEditorMock.mockResolvedValue("plain text");
-    const result = await (handlers as any).wordpress_content_editor_run({
+    const result = await runContentEditorRelay({
       primitiveName: "wordpress_content_editor_run",
       input: { instanceId: "site-1", postId: 10, instructions: "x" },
       actor: { actorType: "model", source: "agent" },
@@ -273,7 +284,7 @@ describe("wordpress_content_editor_run", () => {
 
   it("falls back to { result: \"\" } when the dispatch reply is empty", async () => {
     dispatchContentEditorMock.mockResolvedValue("");
-    const result = await (handlers as any).wordpress_content_editor_run({
+    const result = await runContentEditorRelay({
       primitiveName: "wordpress_content_editor_run",
       input: { instanceId: "site-1", postId: 10, instructions: "x" },
       actor: { actorType: "model", source: "agent" },

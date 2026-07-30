@@ -34,6 +34,7 @@ vi.mock("../deps", () => ({
 vi.mock("../setup-actions", () => ({
   deleteWordPressInstanceAction: vi.fn(),
   setWordPressTrustedSiteModeAction: vi.fn(),
+  installCatalogPluginRemoteAction: vi.fn(),
 }));
 
 // The connect-card's own behaviour (Nango session, toast-on-error, …) is
@@ -60,6 +61,15 @@ vi.mock("../wordpress-trusted-site-card", () => ({
 vi.mock("../wordpress-least-privilege-card", () => ({
   WordPressLeastPrivilegeCard: () => (
     <div data-testid="least-privilege-card-stub">Least-privilege check</div>
+  ),
+}));
+
+// The remote-assist install card (cinatra#2021 S6/delta) has its own test
+// file (wordpress-remote-assist-install-card.test.tsx); stub it here for the
+// same reason as the trusted-site card above.
+vi.mock("../wordpress-remote-assist-install-card", () => ({
+  WordPressRemoteAssistInstallCard: () => (
+    <div data-testid="remote-assist-install-card-stub">Remote-assist plugin install</div>
   ),
 }));
 
@@ -187,6 +197,9 @@ describe("WordPressSettingsPage — connector-setup-tabs (#70)", () => {
     expect(connectionsPanel.textContent).toContain("Marketing blog");
     expect(connectionsPanel.textContent).toContain("blog.example.com");
     expect(connectionsPanel.textContent).not.toContain("Setup instructions");
+    // cinatra#2021 S6/delta — the remote-assist install card renders per
+    // instance alongside the trusted-site card (both stubbed above).
+    expect(connectionsPanel.textContent).toContain("Remote-assist plugin install");
 
     expect(helpPanel.textContent).toContain("Setup instructions");
     // Help is read-only — no form/Save action in its content.

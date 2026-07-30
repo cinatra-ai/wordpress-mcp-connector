@@ -4,6 +4,10 @@ export { WordPressNangoConnectCard } from "./wordpress-nango-connect-card";
 export { createWordPressModule } from "./mcp/module";
 export { registerWordPressPrimitives } from "./mcp/registry";
 export { createWordPressPrimitiveHandlers } from "./mcp/handlers";
+// cinatra-ai/cinatra#2022 S7 — the content-editor RELAY (cinatra#246: a
+// dispatch primitive, deliberately never a model-visible MCP tool) lives in
+// its own module, separate from `createWordPressPrimitiveHandlers()`.
+export { runContentEditorRelay, contentEditorRunSchema } from "./mcp/relay";
 export { createWordPressWidgetChatTool, type WordPressWidgetContext } from "./widget-chat-tool";
 
 
