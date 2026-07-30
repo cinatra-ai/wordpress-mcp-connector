@@ -5,11 +5,14 @@
 // stored credential. For WordPress the two in-admin editing primitives
 // (`wordpress_post_get` → a `GET /wp/v2/*` and `wordpress_post_update` → a
 // `POST /wp/v2/*`) were rerouted onto the site's MCP content server via
-// `callWordPressMcp` (S1). This fast, Docker-free guard asserts that reroute at
-// TWO layers so it cannot silently regress:
+// `callWordPressMcp` (S1), and later onto the governed connector-instance
+// invoker's `ewpa/get-post` / `ewpa/get-page` / `ewpa/update-post` abilities
+// (cinatra-ai/cinatra#2022). This fast, Docker-free guard asserts that reroute
+// at TWO layers so it cannot silently regress:
 //
-//   (A) BEHAVIOR — `wordpress_post_get` / `wordpress_post_update` invoke the MCP
-//       client (`callWordPressMcp`) and make ZERO `globalThis.fetch` calls.
+//   (A) BEHAVIOR — `wordpress_post_get` / `wordpress_post_update` invoke the
+//       governed invoker (`invokeSiteTool`) and make ZERO `globalThis.fetch`
+//       calls.
 //   (B) STATIC   — the handler source references no direct-REST egress at all
 //       (`fetch(` / a `/wp/v2` URL path / the deleted direct-REST helpers).
 //
@@ -22,9 +25,9 @@ import type { WordPressConnectorDeps } from "../deps";
 
 vi.mock("../lib/wordpress-mcp-client", () => ({
   callWordPressMcp: vi.fn(),
-  CINATRA_POST_GET_TOOL: "cinatra-post-get",
-  CINATRA_POST_UPDATE_TOOL: "cinatra-post-update",
   // wordpress-plugin#82 — the six rehomed primitives' MCP tool names.
+  // wordpress_post_get / wordpress_post_update no longer use this client
+  // (cinatra-ai/cinatra#2022) — see the governed-invoker mock below.
   CINATRA_POST_STATUS_TOOL: "cinatra-post-status",
   CINATRA_POSTS_LIST_TOOL: "cinatra-posts-list",
   CINATRA_POST_DELETE_TOOL: "cinatra-post-delete",
@@ -39,6 +42,10 @@ import { registerWordPressConnector, _resetWordPressDepsForTests } from "../deps
 
 const listMcpInstancesMock = vi.fn((): any[] => []);
 const requireInstanceWriteAuthorityMock = vi.fn(async () => {});
+// The governed invoker mock (cinatra-ai/cinatra#2022) backing
+// wordpress_post_get / wordpress_post_update. Each test sets its own
+// per-ability response via mockImplementation.
+const invokeSiteToolMock = vi.fn();
 
 function registerDepsStub() {
   registerWordPressConnector({
@@ -64,6 +71,7 @@ function registerDepsStub() {
     uploadMedia: vi.fn(),
     updateDraftMeta: vi.fn(),
     requireInstanceWriteAuthority: requireInstanceWriteAuthorityMock,
+    invokeSiteTool: invokeSiteToolMock,
   } as WordPressConnectorDeps);
 }
 
@@ -93,6 +101,7 @@ describe("in-admin egress guard — behavior", () => {
     listMcpInstancesMock.mockReset().mockReturnValue([inst("site-1")]);
     requireInstanceWriteAuthorityMock.mockReset().mockResolvedValue(undefined);
     vi.mocked(callWordPressMcp).mockReset();
+    invokeSiteToolMock.mockReset();
     // A real fetch on the in-admin path is the violation this guard catches; spy
     // so any call is observable (and throws, proving the path does NOT depend on it).
     fetchSpy = vi.fn(async () => {
@@ -108,15 +117,18 @@ describe("in-admin egress guard — behavior", () => {
     _resetWordPressDepsForTests();
   });
 
-  it("wordpress_post_get reads through callWordPressMcp (cinatra-post-get), never a direct fetch", async () => {
-    vi.mocked(callWordPressMcp).mockResolvedValue({
-      id: 1,
-      status: "publish",
-      title: "T",
-      content: "<p>b</p>",
-      excerpt: "",
-      slug: "t",
-      link: "http://localhost:8081/?p=1",
+  it("wordpress_post_get reads through the governed invoker (ewpa/get-post), never a direct fetch", async () => {
+    invokeSiteToolMock.mockResolvedValue({
+      success: true,
+      data: {
+        ID: 1,
+        post_status: "publish",
+        post_title: "T",
+        post_content: "<p>b</p>",
+        post_excerpt: "",
+        post_name: "t",
+        permalink: "http://localhost:8081/?p=1",
+      },
     });
 
     const result = (await (handlers as any).wordpress_post_get({
@@ -126,33 +138,50 @@ describe("in-admin egress guard — behavior", () => {
       mode: "agentic",
     })) as any;
 
-    // The MCP client IS the read transport.
-    expect(callWordPressMcp).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "site-1" }),
-      "cinatra-post-get",
-      { id: 1 },
-    );
+    // The governed invoker IS the read transport.
+    expect(invokeSiteToolMock).toHaveBeenCalledWith({
+      toolName: "ewpa/get-post",
+      args: { post_id: 1 },
+      instanceId: "site-1",
+    });
     // ZERO direct-REST egress on the read path.
     expect(fetchSpy).not.toHaveBeenCalled();
-    // The full-body before-value arrived over MCP.
+    // The full-body before-value arrived over the governed invoker.
     expect(result.content).toBe("<p>b</p>");
     expect(result.adminUrl).toContain("/wp-admin/post.php?post=1");
   });
 
-  it("wordpress_post_get forwards postType:'page' to the MCP tool", async () => {
-    vi.mocked(callWordPressMcp).mockResolvedValue({ id: 5, status: "draft", title: "P", content: "", excerpt: "" });
+  it("wordpress_post_get dispatches ewpa/get-page for postType:'page'", async () => {
+    invokeSiteToolMock.mockResolvedValue({
+      success: true,
+      data: { ID: 5, post_status: "draft", post_title: "P", post_content: "", post_excerpt: "" },
+    });
     await (handlers as any).wordpress_post_get({
       primitiveName: "wordpress_post_get",
       input: { instanceId: "site-1", postId: 5, postType: "page" },
       actor: { actorType: "model", source: "agent" },
       mode: "agentic",
     });
-    expect(callWordPressMcp).toHaveBeenCalledWith(expect.anything(), "cinatra-post-get", { id: 5, postType: "page" });
+    expect(invokeSiteToolMock).toHaveBeenCalledWith({
+      toolName: "ewpa/get-page",
+      args: { post_id: 5 },
+      instanceId: "site-1",
+    });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("wordpress_post_update writes through callWordPressMcp (cinatra-post-update), never a direct fetch", async () => {
-    vi.mocked(callWordPressMcp).mockResolvedValue({ id: 1, status: "draft", title: "X", content: "Y", excerpt: "" });
+  it("wordpress_post_update writes through the governed invoker (ewpa/update-post), never a direct fetch", async () => {
+    invokeSiteToolMock.mockImplementation(async (input: { toolName: string; args: Record<string, unknown> }) => {
+      if (input.toolName === "ewpa/update-post") {
+        return { success: true, data: { post_id: input.args.post_id, message: "Post updated successfully." } };
+      }
+      // The post-write independent re-read (ewpa/get-post) — see
+      // updatePostViaMcp's doc comment for why the write's own echo isn't trusted.
+      return {
+        success: true,
+        data: { ID: 1, post_status: "draft", post_title: "X", post_content: "Y", post_excerpt: "" },
+      };
+    });
 
     await (handlers as any).wordpress_post_update({
       primitiveName: "wordpress_post_update",
@@ -161,12 +190,12 @@ describe("in-admin egress guard — behavior", () => {
       mode: "agentic",
     });
 
-    // demote-then-edit preserved: status:draft + edits reach the MCP tool.
-    expect(callWordPressMcp).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "site-1" }),
-      "cinatra-post-update",
-      { id: 1, status: "draft", title: "X", content: "Y" },
-    );
+    // demote-then-edit preserved: status:draft + edits reach the ability.
+    expect(invokeSiteToolMock).toHaveBeenCalledWith({
+      toolName: "ewpa/update-post",
+      args: { post_id: 1, status: "draft", title: "X", content: "Y" },
+      instanceId: "site-1",
+    });
     // The #409 write-authority gate ran BEFORE the write.
     expect(requireInstanceWriteAuthorityMock).toHaveBeenCalledWith(
       expect.objectContaining({ instanceId: "site-1", primitiveName: "wordpress_post_update" }),
@@ -174,7 +203,7 @@ describe("in-admin egress guard — behavior", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("a denied write-authority gate blocks the update BEFORE any MCP call (fail-closed)", async () => {
+  it("a denied write-authority gate blocks the update BEFORE any invoker call (fail-closed)", async () => {
     requireInstanceWriteAuthorityMock.mockRejectedValueOnce(new Error("not authorized"));
     await expect(
       (handlers as any).wordpress_post_update({
@@ -185,6 +214,7 @@ describe("in-admin egress guard — behavior", () => {
       }),
     ).rejects.toThrow(/not authorized/);
     expect(callWordPressMcp).not.toHaveBeenCalled();
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
@@ -213,6 +243,7 @@ describe("in-admin egress guard — the #82 rehomed primitives route via MCP", (
     listMcpInstancesMock.mockReset().mockReturnValue([inst("site-1")]);
     requireInstanceWriteAuthorityMock.mockReset().mockResolvedValue(undefined);
     vi.mocked(callWordPressMcp).mockReset().mockResolvedValue({});
+    invokeSiteToolMock.mockReset();
     fetchSpy = vi.fn(async () => {
       throw new Error("direct fetch is forbidden on the in-admin content path");
     });
@@ -329,12 +360,19 @@ describe("in-admin egress guard — static source", () => {
     }
   });
 
-  it("routes the in-admin read/update through the MCP client (positive control)", () => {
-    expect(code).toContain("callWordPressMcp");
-    expect(code).toContain("CINATRA_POST_GET_TOOL");
-    expect(code).toContain("CINATRA_POST_UPDATE_TOOL");
+  it("routes the in-admin read/update through the governed connector-instance invoker (positive control, cinatra-ai/cinatra#2022)", () => {
+    expect(code).toContain("invokeSiteTool");
+    expect(code).toContain("ewpa/get-post");
+    expect(code).toContain("ewpa/get-page");
+    expect(code).toContain("ewpa/update-post");
     expect(code).toContain("readPostViaMcp");
     expect(code).toContain("updatePostViaMcp");
+  });
+
+  it("no longer references the retired cinatra-content-server get/update tool constants (negative control)", () => {
+    for (const retired of ["CINATRA_POST_GET_TOOL", "CINATRA_POST_UPDATE_TOOL"]) {
+      expect(code).not.toContain(retired);
+    }
   });
 
   // wordpress-plugin#82 — the six rehomed primitives route through the MCP

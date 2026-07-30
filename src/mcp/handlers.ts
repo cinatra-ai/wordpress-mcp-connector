@@ -7,10 +7,14 @@ import type { ExtensionPrimitiveRequest } from "@cinatra-ai/sdk-extensions";
 // `@cinatra-ai/host:mcp-pagination` — no `@/lib/wordpress-api` import.
 //
 // EXCEPT the two in-admin editing primitives: `wordpress_post_get` /
-// `wordpress_post_update` reach WordPress content ONLY through the site's MCP
-// integration (`callWordPressMcp` → the plugin's `cinatra-post-get` /
-// `cinatra-post-update` tools), never a direct `/wp/v2/*` REST call
-// (cinatra#1214 S1). The old `readPost`/`updatePost` direct-REST deps are gone.
+// `wordpress_post_update` reach WordPress content through the GOVERNED
+// CONNECTOR-INSTANCE INVOKER (`getWordPressDeps().invokeSiteTool`, the SAME
+// channel `wordpress_site_tool_call` uses), calling the community "Enable
+// Abilities for MCP" catalog's `ewpa/get-post` / `ewpa/get-page` /
+// `ewpa/update-post` abilities — never `cinatra-content-server` and never a
+// direct `/wp/v2/*` REST call (cinatra-ai/cinatra#2022; see the section
+// comment above `readPostViaMcp` below for the retarget's evidence + the
+// fail-loud content guard).
 import {
   getWordPressDeps,
   listInstancesSorted,
@@ -24,8 +28,6 @@ import {
 import { WORDPRESS_CONNECTOR_ID } from "../integration/pointer-writer-core";
 import {
   callWordPressMcp,
-  CINATRA_POST_GET_TOOL,
-  CINATRA_POST_UPDATE_TOOL,
   CINATRA_POST_STATUS_TOOL,
   CINATRA_POSTS_LIST_TOOL,
   CINATRA_POST_DELETE_TOOL,
@@ -199,17 +201,59 @@ export const postUpdateSchema = z
   );
 
 // ---------------------------------------------------------------------------
-// In-admin MCP-primary content read/update (cinatra#1214 S1).
+// In-admin content read/update — GOVERNED INVOKER retarget (cinatra-ai/
+// cinatra#2022).
 //
-// The in-admin assistant reaches WordPress content ONLY through the site's MCP
-// integration: `wordpress_post_get` / `wordpress_post_update` route through
-// `callWordPressMcp` to the plugin-owned `cinatra-post-get` /
-// `cinatra-post-update` tools (cinatra-ai/wordpress-plugin #81), NEVER a direct
-// `/wp/v2/*` REST call. `callWordPressMcp` detects the tools at runtime and
-// throws fail-closed when the plugin is missing/too old — it never degrades to
-// direct REST. The per-user #409 write-authority gate stays in the handler
-// (transport-independent).
+// `wordpress_post_get` / `wordpress_post_update` USED TO reach WordPress
+// content only through the site's Cinatra-owned MCP integration
+// (`callWordPressMcp` → the plugin's `cinatra-post-get` / `cinatra-post-update`
+// abilities on `cinatra-content-server`, cinatra-ai/wordpress-plugin #81).
+// They now reach it through the GOVERNED CONNECTOR-INSTANCE INVOKER
+// (`getWordPressDeps().invokeSiteTool`, the SAME channel
+// `wordpress_site_tool_call` already uses), calling the community "Enable
+// Abilities for MCP" catalog's `ewpa/get-post` / `ewpa/get-page` /
+// `ewpa/update-post` abilities. Tool NAMES are UNCHANGED — only the transport
+// underneath moves; the old cinatra-content-server path is a later,
+// separately reviewed deletion once this soaks.
+//
+// ABILITY EXISTENCE. `ewpa/get-post` was never VERIFY-executed against the
+// pinned WordPress e2e fixture (only the LIST ability `ewpa/get-posts` was,
+// and that list response carries NO post-body field at all — evidenced
+// directly in cinatra/tests/e2e/wp-mcp-gateway/captures/verify-verdicts.json,
+// whose `ewpa/get-posts` PASS record's returned items carry `post_title` /
+// `post_status` / `post_date` / `post_excerpt` / `permalink` / `categories` /
+// `tags` and NO `post_content`/`content` key — the exact gap this change
+// must not silently inherit). `ewpa/get-post`'s EXISTENCE, however, is
+// directly evidenced by a live discovery capture against the SAME pinned
+// fixture (WordPress 6.9 / mcp-adapter 0.5.0 / Enable Abilities for MCP
+// 2.0.20, captured 2026-07-29, CI run
+// https://github.com/cinatra-ai/cinatra/actions/runs/30442320352):
+// `cinatra/tests/e2e/wp-mcp-gateway/captures/annotations-c-gateway-triad.json`
+// (and its sibling annotations-f) record the `mcp-adapter-discover-abilities`
+// response listing `ewpa/get-post` with the self-described purpose
+// "Retrieves all details of a specific post by ID, including full content,
+// metadata, and featured image." A companion `ewpa/get-page` ability exists
+// for pages in the SAME capture; no page-specific UPDATE ability exists
+// (only `ewpa/update-post`) — WordPress core's `wp_update_post()` is
+// post-type-agnostic, so the same update ability is used for both.
+//
+// FAIL-LOUD CONTENT GUARD. This change could not execute a live
+// `ewpa/get-post` call (no dev/verify stack boots on this box) to confirm
+// its exact response FIELD NAMES, only its existence + advertised purpose.
+// `extractEwpaContent` below checks the WP_Post-native `post_content` key
+// first (the SAME snake_case `post_*` convention already VERIFIED on
+// `ewpa/get-posts`'s list items and on `ewpa/delete-post`'s captured
+// `input_schema` — a real, evidenced pattern, not a guess) and `content` as
+// a fallback — but NEVER silently coerces an absent key to `""`. An absent
+// key throws a descriptive error instead, so a wrong field-name inference
+// fails LOUD in CI/e2e (the pinned-fixture `wordpress-uat.spec.ts` /
+// `wordpress-render-parity-uat.spec.ts` suites) rather than shipping a
+// silent content-losing read.
 // ---------------------------------------------------------------------------
+
+const EWPA_GET_POST_ABILITY = "ewpa/get-post";
+const EWPA_GET_PAGE_ABILITY = "ewpa/get-page";
+const EWPA_UPDATE_POST_ABILITY = "ewpa/update-post";
 
 /** WordPress admin edit URL for a post/page id (the old REST client's shape). */
 function buildAdminUrl(siteUrl: string, postId: number): string {
@@ -220,46 +264,129 @@ function asString(v: unknown): string {
   return typeof v === "string" ? v : "";
 }
 
-/** The `cinatra-post-get` / `cinatra-post-update` ability payload shape. */
-type CinatraPostPayload = {
-  id?: unknown;
-  status?: unknown;
-  title?: unknown;
-  content?: unknown;
-  excerpt?: unknown;
-  slug?: unknown;
-  link?: unknown;
-};
+/**
+ * Call an `ewpa/*` ability through the governed connector-instance invoker
+ * and unwrap its `{success, data}` response envelope — the community
+ * catalog's own convention, evidenced directly by the pinned-fixture S1
+ * VERIFY captures for `ewpa/create-post`, `ewpa/update-post-meta`, and
+ * `ewpa/get-posts` (all three PASS records return `{success:true,
+ * data:{...}}`, cinatra/tests/e2e/wp-mcp-gateway/captures/verify-verdicts.json).
+ * FAIL-CLOSED: the governed invoker unbound, an explicit `success:false`, or
+ * a non-object `data` all throw rather than returning a guessed/empty shape —
+ * the same fail-closed posture `wordpress_site_tool_call` already carries.
+ */
+async function callEwpaAbility(
+  instance: WordPressMcpInstance,
+  toolName: string,
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const invoke = getWordPressDeps().invokeSiteTool;
+  if (typeof invoke !== "function") {
+    throw new Error(
+      `WordPress "${toolName}" denied: the governed connector-instance invoker is unavailable ` +
+        "(host @cinatra-ai/host:connector-instance-invoker unbound). Refusing to call without the governed channel.",
+    );
+  }
+  const raw = await invoke({ toolName, args, instanceId: instance.id });
+  const envelope = raw as { success?: unknown; data?: unknown } | null | undefined;
+  // Codex-adopted hardening: require the EXPLICIT `success:true` the envelope
+  // contract promises, not merely "not false" — an envelope missing the
+  // `success` key entirely is a malformed/unexpected response, not an
+  // implicit pass, and must fail closed the same as an explicit false.
+  if (!envelope || typeof envelope !== "object" || envelope.success !== true) {
+    throw new Error(`WordPress ${toolName} failed: the site reported an unsuccessful result.`);
+  }
+  if (!envelope.data || typeof envelope.data !== "object") {
+    throw new Error(`WordPress ${toolName}: unexpected response shape (no "data" object).`);
+  }
+  return envelope.data as Record<string, unknown>;
+}
 
-/** Read a post for editing over MCP. Returns the same field shape the old
- * direct-REST `readWordPressPost` returned (the before-values the
- * content-editor agent's field-diff reads), with `adminUrl` built
- * connector-side. `postType:"page"` is forwarded so the plugin resolves a page. */
+/**
+ * The community catalog's pinned-fixture discovery capture registers
+ * DISTINCT read abilities for posts and pages (`ewpa/get-post` /
+ * `ewpa/get-page`) and SEPARATE abilities entirely for custom post types
+ * (`ewpa/get-cpt-item` / `ewpa/get-cpt-items`, not wired up by this retarget).
+ * Codex-adopted hardening: an unsupported `postType` (a CPT slug, a typo,
+ * anything besides the default/"post"/"page") is refused rather than
+ * silently mis-routed to a post- or page-shaped ability that was never
+ * proven to handle it.
+ */
+function assertSupportedReadPostType(postType: string | undefined, primitiveName: string): void {
+  if (postType !== undefined && postType !== "post" && postType !== "page") {
+    throw new Error(
+      `${primitiveName}: postType "${postType}" is not supported by the governed-invoker retarget ` +
+        '(only the default and "page" have a proven ewpa/* ability behind them — "page" routes to ' +
+        "ewpa/get-page). Custom post types need their own ewpa/get-cpt-item-based primitive, not this one.",
+    );
+  }
+}
+
+/**
+ * Extract the post body from an `ewpa/get-post` / `ewpa/get-page` result.
+ * HARD REQUIREMENT: NEVER silently coerce an absent content key to `""` —
+ * that is exactly how the earlier `ewpa/get-posts` re-point lost post bodies
+ * unnoticed (see the section comment above). Throws when neither known key
+ * is present, so a wrong field-name inference fails loud instead of shipping
+ * empty content.
+ */
+function extractEwpaContent(data: Record<string, unknown>, toolName: string): string {
+  if (typeof data.post_content === "string") return data.post_content;
+  if (typeof data.content === "string") return data.content;
+  throw new Error(
+    `WordPress ${toolName}: response carried no recognizable content field ` +
+      '(checked "post_content", "content") — refusing to return empty content silently.',
+  );
+}
+
+/** Read a post for editing via the governed invoker. Returns the same field
+ * shape the old direct-REST `readWordPressPost` (and, before this PR, the
+ * `cinatra-post-get`-backed version) returned — the before-values the
+ * content-editor agent's field-diff reads — with `adminUrl` built
+ * connector-side. `postType:"page"` dispatches to `ewpa/get-page` instead of
+ * `ewpa/get-post` (the pinned fixture's discovery capture registers them as
+ * distinct abilities; see the section comment above). */
 async function readPostViaMcp(
   instance: WordPressMcpInstance,
   postId: number,
   postType?: string,
 ) {
-  const args: Record<string, unknown> = { id: postId };
-  if (postType !== undefined) args.postType = postType;
-  const raw = (await callWordPressMcp(instance, CINATRA_POST_GET_TOOL, args)) as CinatraPostPayload;
-  const id = Number(raw?.id);
+  assertSupportedReadPostType(postType, "wordpress_post_get");
+  const ability = postType === "page" ? EWPA_GET_PAGE_ABILITY : EWPA_GET_POST_ABILITY;
+  const data = await callEwpaAbility(instance, ability, { post_id: postId });
+  const content = extractEwpaContent(data, ability);
+  const idRaw = data.ID ?? data.id ?? data.post_id;
+  const id = Number(idRaw);
   const resolvedId = Number.isFinite(id) ? id : postId;
+  const title = data.post_title ?? data.title;
+  const excerpt = data.post_excerpt ?? data.excerpt;
+  const status = data.post_status ?? data.status;
+  const link = data.permalink ?? data.link;
+  const slug = data.post_name ?? data.slug;
   return {
     id: resolvedId,
-    status: asString(raw?.status) || "unknown",
-    title: asString(raw?.title),
-    content: asString(raw?.content),
-    excerpt: asString(raw?.excerpt),
-    slug: typeof raw?.slug === "string" ? raw.slug : undefined,
-    link: typeof raw?.link === "string" ? raw.link : undefined,
+    status: asString(status) || "unknown",
+    title: asString(title),
+    content,
+    excerpt: asString(excerpt),
+    slug: typeof slug === "string" ? slug : undefined,
+    link: typeof link === "string" ? link : undefined,
     adminUrl: buildAdminUrl(instance.siteUrl, resolvedId),
   };
 }
 
-/** Update a post over MCP (title/content/excerpt/status; demote-then-edit via
- * status:"draft"). Returns the same field shape the old direct-REST
- * `updateWordPressPost` returned. */
+/** Update a post via the governed invoker (title/content/excerpt/status;
+ * demote-then-edit via status:"draft"). Returns the same field shape the old
+ * direct-REST `updateWordPressPost` returned.
+ *
+ * The community ability's own response envelope is NOT proven to echo the
+ * full updated post back (the evidenced pattern — `ewpa/create-post`'s PASS
+ * response is `{post_id, permalink, status, message}`, no title/content
+ * echo). Rather than guess at an echoed shape and risk silently returning
+ * stale/empty content to the caller, this independently RE-READS the post
+ * after applying the write, reusing the SAME content-preserving read path
+ * `readPostViaMcp` uses above — mirroring what `wordpress_post_update`'s own
+ * review-gate post-apply verification already does one level up. */
 async function updatePostViaMcp(input: {
   instance: WordPressMcpInstance;
   postId: number;
@@ -272,12 +399,13 @@ async function updatePostViaMcp(input: {
     meta?: Record<string, unknown>;
   };
 }) {
-  // The plugin's `cinatra-post-update` ability (the ratified MCP surface, #81)
-  // covers title/content/excerpt/status only — NOT `meta`. Rather than silently
-  // drop a requested change, fail closed and route the caller to the dedicated
-  // meta primitive (`wordpress_post_update_meta` stays on its REST carve-out per
-  // the #1214 design §C — meta over MCP would need a plugin ability that #81
-  // does not register).
+  // `ewpa/update-post` (the community catalog's ability, replacing
+  // `cinatra-post-update`) covers title/content/excerpt/status only — NOT
+  // `meta`. Rather than silently drop a requested change, fail closed and
+  // route the caller to the dedicated meta primitive
+  // (`wordpress_post_update_meta` stays on its REST carve-out). DEFENSIVE
+  // BACKSTOP: the `wordpress_post_update` handler above already rejects this
+  // pre-gate; this repeats the check for `updatePostViaMcp`'s own callers.
   if (input.fields.meta !== undefined) {
     throw new Error(
       "wordpress_post_update cannot write post meta over the MCP content server — " +
@@ -285,34 +413,33 @@ async function updatePostViaMcp(input: {
     );
   }
 
-  // Build the tool args: strip undefined; drop empty-string content/excerpt
+  // Build the ability args: strip undefined; drop empty-string content/excerpt
   // (WordPress applies them literally and would wipe the body). Only literal
-  // "" is dropped so a legitimate title clear still works.
-  const args: Record<string, unknown> = { id: input.postId };
-  if (input.postType !== undefined) args.postType = input.postType;
+  // "" is dropped so a legitimate title clear still works. `post_id` matches
+  // the community catalog's own identify-by-id convention (evidenced on
+  // `ewpa/delete-post`'s captured input_schema, which requires `post_id`).
+  const args: Record<string, unknown> = { post_id: input.postId };
   if (typeof input.fields.title === "string") args.title = input.fields.title;
   if (typeof input.fields.content === "string" && input.fields.content.length > 0) args.content = input.fields.content;
   if (typeof input.fields.excerpt === "string" && input.fields.excerpt.length > 0) args.excerpt = input.fields.excerpt;
   if (typeof input.fields.status === "string") args.status = input.fields.status;
 
   // Guard against dispatching an update with no editable field left after
-  // stripping (the ability rejects it 400 anyway; surface it precisely).
-  const editableKeys = Object.keys(args).filter((k) => k !== "id" && k !== "postType");
+  // stripping (the ability would reject it anyway; surface it precisely).
+  // DEFENSIVE BACKSTOP: the handler above already rejects this pre-gate.
+  const editableKeys = Object.keys(args).filter((k) => k !== "post_id");
   if (editableKeys.length === 0) {
     throw new Error("No editable fields to update (title/content/excerpt/status).");
   }
 
-  const raw = (await callWordPressMcp(input.instance, CINATRA_POST_UPDATE_TOOL, args)) as CinatraPostPayload;
-  const id = Number(raw?.id);
-  const resolvedId = Number.isFinite(id) ? id : input.postId;
-  return {
-    id: resolvedId,
-    status: asString(raw?.status) || "unknown",
-    title: asString(raw?.title),
-    content: asString(raw?.content),
-    excerpt: asString(raw?.excerpt),
-    adminUrl: buildAdminUrl(input.instance.siteUrl, resolvedId),
-  };
+  // No page-specific update ability exists in the pinned fixture's discovery
+  // capture (only `ewpa/get-page` for reads) — WordPress core's
+  // `wp_update_post()` is post-type-agnostic, so `ewpa/update-post` targets
+  // pages too (`input.postType` is not sent — the ability keys purely off
+  // `post_id`, same as `ewpa/delete-post`'s evidenced schema).
+  await callEwpaAbility(input.instance, EWPA_UPDATE_POST_ABILITY, args);
+
+  return readPostViaMcp(input.instance, input.postId, input.postType);
 }
 
 // ---------------------------------------------------------------------------
@@ -511,8 +638,13 @@ export function createWordPressPrimitiveHandlers() {
     // Page discovery. Mirrors wordpress_posts_list exactly (same cursor
     // pagination + metadata-only projection) but lists pages through the plugin's
     // cinatra-posts-list tool with postType:"page". Lets an external MCP caller
-    // find a WordPress page, then read or update it with wordpress_post_get /
-    // wordpress_post_update passing postType: "page".
+    // find a WordPress page, then read its status or content with
+    // wordpress_post_status / wordpress_post_get passing postType: "page" (both
+    // proven to support pages), or delete it with wordpress_post_delete. NOT
+    // wordpress_post_update — the governed-invoker retarget (cinatra-ai/
+    // cinatra#2022) fails closed on postType:"page" for updates specifically
+    // (no proven/distinct ewpa update-a-page ability exists yet; see that
+    // handler's own comment) — page editing has no supported primitive today.
     "wordpress_pages_list": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const { instanceId, cursor } = postsListSchema.parse(request.input);
       const instances = listInstancesSorted();
@@ -547,9 +679,12 @@ export function createWordPressPrimitiveHandlers() {
       const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
-      // MCP-only egress (cinatra#1214 S1): read over the plugin's content MCP
-      // server (cinatra-post-get), never a direct /wp/v2/* fetch. Fail-closed
-      // if the tool is absent (plugin missing/too old).
+      // GOVERNED-INVOKER egress (cinatra-ai/cinatra#2022): read via the
+      // community catalog's ewpa/get-post (or ewpa/get-page for
+      // postType:"page") ability
+      // through the governed connector-instance invoker, never
+      // cinatra-content-server and never a direct /wp/v2/* fetch. Fail-closed
+      // if the invoker is unbound (see readPostViaMcp's section comment).
       return readPostViaMcp(instance, postId, postType);
     },
 
@@ -584,17 +719,63 @@ export function createWordPressPrimitiveHandlers() {
       return updateMetaViaMcp(instance, postId, safeMeta);
     },
 
-    // Top-level WordPress post update (title/content/excerpt/status) over the
-    // site's MCP content server (cinatra-post-update), never a direct REST call
-    // (cinatra#1214 S1). This is the primitive the wordpress-content-editor
+    // Top-level WordPress post update (title/content/excerpt/status) via the
+    // governed connector-instance invoker (ewpa/update-post —
+    // cinatra-ai/cinatra#2022), never cinatra-content-server and never a
+    // direct REST call. This is the primitive the wordpress-content-editor
     // SKILL.md uses for the demote-then-edit pattern (status:draft + edits in
     // one call). Meta-only writes stay on the wordpress_post_update_meta
-    // carve-out (the MCP ability does not cover post meta).
+    // carve-out (the ability does not cover post meta).
     "wordpress_post_update": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const input = postUpdateSchema.parse(request.input);
+      // CodeRabbit-adopted hardening: fail closed on an input `updatePostViaMcp`
+      // could never apply BEFORE the review gate below captures anything — same
+      // reason the postType checks further down are hoisted pre-gate. Without
+      // this, a request that mixes a real field change (e.g. `title`) with
+      // `meta`, or that reduces to no editable field, can get captured and HELD
+      // for human review, then fail permanently at apply time — stranding an
+      // APPROVED-but-inapplicable review and wasting the reviewer's decision.
+      // The matching checks stay in `updatePostViaMcp` too as a defensive
+      // backstop (it has no other caller today, but the redundancy is cheap).
+      if (input.meta !== undefined) {
+        throw new Error(
+          "wordpress_post_update cannot write post meta over the MCP content server — " +
+            "use wordpress_post_update_meta for meta writes.",
+        );
+      }
+      const hasEditableField =
+        typeof input.title === "string" ||
+        (typeof input.content === "string" && input.content.length > 0) ||
+        (typeof input.excerpt === "string" && input.excerpt.length > 0) ||
+        typeof input.status === "string";
+      if (!hasEditableField) {
+        throw new Error("No editable fields to update (title/content/excerpt/status).");
+      }
       const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === input.instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
+      // Codex-adopted hardening: refuse an unproven postType BEFORE the
+      // review-gate captures anything below — not at apply time, which would
+      // strand an APPROVED-but-inapplicable review. Unlike the read side
+      // (ewpa/get-page is proven to exist for postType:"page"), there is no
+      // captured schema or execution proving ewpa/update-post accepts a page
+      // id, and no distinct ewpa/update-page ability exists in the pinned
+      // fixture's discovery capture — so "page" is refused here too, not
+      // just arbitrary/CPT postType values.
+      if (input.postType === "page") {
+        throw new Error(
+          'wordpress_post_update: postType "page" is not supported by the governed-invoker retarget — ' +
+            "ewpa/update-post's behavior against a page id has not been proven (no captured schema or " +
+            "execution, and no distinct page-update ability exists in the pinned fixture's discovery " +
+            "capture). Refusing to write rather than guess.",
+        );
+      }
+      if (input.postType !== undefined && input.postType !== "post") {
+        throw new Error(
+          `wordpress_post_update: postType "${input.postType}" is not supported by the governed-invoker ` +
+            "retarget. Custom post types need their own ewpa/get-cpt-item-based primitive, not this one.",
+        );
+      }
       // cinatra#409 — per-user / per-instance write authorization (fail-closed).
       // Transport-independent: it gates BEFORE any write reaches WordPress.
       await requireWriteAuthority(input.instanceId, "wordpress_post_update");
@@ -605,9 +786,22 @@ export function createWordPressPrimitiveHandlers() {
       // WordPress; only an approved gate releases the apply. FENCE-OFF / no seam
       // bound → `{action:"pass"}` with no capture and no extra fetch, so the write
       // below is byte-identical to pre-S5. Meta-only writes are NOT content review
-      // targets (the MCP content ability does not cover meta) — a write that
-      // carries `meta` still routes through the trigger for its title/content/
-      // excerpt/status fields, and `updatePostViaMcp` fail-closes on meta anyway.
+      // targets (the ability does not cover meta) — a write that carries `meta`
+      // still routes through the trigger for its title/content/excerpt/status
+      // fields, and `updatePostViaMcp` fail-closes on meta anyway.
+      //
+      // NOT YET migrated onto cinatra core's generic content-review hook slot
+      // (`connector-instance-invoker.ts`'s `contentReviewHook`, cinatra-ai/
+      // cinatra#2215). That migration requires BINDING a WordPress hook
+      // implementation into `buildConnectorInstanceInvokerDeps` (cinatra
+      // core, `register-host-connector-services.ts` — the exact spot
+      // `destructiveHook` is bound today), which is cinatra-core work no
+      // wordpress-mcp-connector-only change can reach (connector packages
+      // carry no `@/lib/*` host import edge — the whole reason this deps-DI
+      // slot exists). Disclosed gap, not silently dropped — see this PR's
+      // body. This inline wiring stays the ENFORCEMENT POINT until that
+      // companion cinatra-core change ships and is verified; the review gate
+      // is unchanged and fully active, exactly as before.
       const review = await evaluateStagedContentWrite({
         seam: getWordPressDeps().cmsReview,
         connectorId: WORDPRESS_CONNECTOR_ID,
@@ -643,10 +837,11 @@ export function createWordPressPrimitiveHandlers() {
       }
 
       // PASS (fence off / org-ungated / nothing to review) or APPLY (an approved
-      // gate released the effect). Either way the write proceeds. MCP-only egress
-      // (cinatra#1214 S1): update over the plugin's content MCP server
-      // (cinatra-post-update), never a direct /wp/v2/* fetch. The demote-then-edit
-      // gate (status:"draft") is preserved by forwarding the status field.
+      // gate released the effect). Either way the write proceeds. GOVERNED-
+      // INVOKER egress (cinatra-ai/cinatra#2022): update via ewpa/update-post,
+      // never cinatra-content-server and never a direct /wp/v2/* fetch. The
+      // demote-then-edit gate (status:"draft") is preserved by forwarding the
+      // status field.
       const applied = await updatePostViaMcp({
         instance,
         postId: input.postId,
@@ -666,22 +861,26 @@ export function createWordPressPrimitiveHandlers() {
       // byte-identically below.
       if (review.action === "apply") {
         const seam = getWordPressDeps().cmsReview;
-        // INDEPENDENT post-apply RE-READ (a fresh cinatra-post-get, NOT the write
-        // response): the update reply echoes what the write requested, so it
-        // cannot surface a SITE-PLUGIN REWRITE-ON-SAVE. Re-reading the persisted
-        // remote state is what lets the read-back verifier catch an out-of-scope
-        // rewrite as `drifted` (a codex convergence finding).
-        const postApply = await readPostViaMcp(instance, input.postId, input.postType);
+        // `applied` IS the post-apply re-read the read-back verifier needs —
+        // NOT the write response's own echo (updatePostViaMcp independently
+        // re-reads via readPostViaMcp internally rather than trusting
+        // ewpa/update-post's echo, which carries no content field at all; see
+        // its doc comment). Re-reading the persisted remote state (never the
+        // request that was sent) is what lets the read-back verifier catch an
+        // out-of-scope rewrite as `drifted` (a codex convergence finding) —
+        // that property holds for `applied` exactly as it would for a SECOND
+        // independent read, so reusing it here (codex-adopted simplification)
+        // drops a redundant WordPress round-trip without weakening the check.
         const readback = seam
           ? await seam.recordApplyVerification({
               operationId: review.operationId,
               gateId: review.gate.gateId,
               runId: review.gate.runId,
               postApplyFields: {
-                title: postApply.title,
-                content: postApply.content,
-                excerpt: postApply.excerpt,
-                status: postApply.status,
+                title: applied.title,
+                content: applied.content,
+                excerpt: applied.excerpt,
+                status: applied.status,
               },
             })
           : { ok: false, code: "seam-unbound" as const };
