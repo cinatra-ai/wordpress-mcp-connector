@@ -58,6 +58,14 @@ cinatra#2022) found no proven, distinct page-update ability in the community
 rather than risk writing against an unproven ability. There is no supported
 page-edit primitive today.
 
+Cinatra also registers two general-purpose primitives, `wordpress_site_tool_call`
+and `wordpress_site_tools_list`, that forward any ability the connected site's
+own MCP catalog exposes through the same governed, policy-checked path as the
+primitives above. They exist in the tool registry today, but no calling
+surface has been switched over to them for pages yet — the named primitives
+above remain the current, fully-wired path. This section will be updated once
+that switch happens.
+
 Treat the injected adapter server as a version-dependent, read-biased extra
 surface — **not** a page-editing path either (see above: it exposes no page
 abilities on the validated version). If a future adapter (or a site plugin)

@@ -408,7 +408,7 @@ async function updatePostViaMcp(input: {
   // pre-gate; this repeats the check for `updatePostViaMcp`'s own callers.
   if (input.fields.meta !== undefined) {
     throw new Error(
-      "wordpress_post_update cannot write post meta over the MCP content server — " +
+      "wordpress_post_update cannot write post meta through the governed connector-instance invoker — " +
         "use wordpress_post_update_meta for meta writes.",
     );
   }
@@ -739,7 +739,7 @@ export function createWordPressPrimitiveHandlers() {
       // backstop (it has no other caller today, but the redundancy is cheap).
       if (input.meta !== undefined) {
         throw new Error(
-          "wordpress_post_update cannot write post meta over the MCP content server — " +
+          "wordpress_post_update cannot write post meta through the governed connector-instance invoker — " +
             "use wordpress_post_update_meta for meta writes.",
         );
       }
