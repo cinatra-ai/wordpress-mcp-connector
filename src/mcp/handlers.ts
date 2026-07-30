@@ -348,13 +348,37 @@ async function callEwpaAbility(
   }
   const raw = await invoke({ toolName, args, instanceId: instance.id });
   const envelope = raw as { success?: unknown; data?: unknown } | null | undefined;
-  if (!envelope || typeof envelope !== "object" || envelope.success === false) {
+  // Codex-adopted hardening: require the EXPLICIT `success:true` the envelope
+  // contract promises, not merely "not false" — an envelope missing the
+  // `success` key entirely is a malformed/unexpected response, not an
+  // implicit pass, and must fail closed the same as an explicit false.
+  if (!envelope || typeof envelope !== "object" || envelope.success !== true) {
     throw new Error(`WordPress ${toolName} failed: the site reported an unsuccessful result.`);
   }
   if (!envelope.data || typeof envelope.data !== "object") {
     throw new Error(`WordPress ${toolName}: unexpected response shape (no "data" object).`);
   }
   return envelope.data as Record<string, unknown>;
+}
+
+/**
+ * The community catalog's pinned-fixture discovery capture registers
+ * DISTINCT read abilities for posts and pages (`ewpa/get-post` /
+ * `ewpa/get-page`) and SEPARATE abilities entirely for custom post types
+ * (`ewpa/get-cpt-item` / `ewpa/get-cpt-items`, not wired up by this retarget).
+ * Codex-adopted hardening: an unsupported `postType` (a CPT slug, a typo,
+ * anything besides the default/"post"/"page") is refused rather than
+ * silently mis-routed to a post- or page-shaped ability that was never
+ * proven to handle it.
+ */
+function assertSupportedReadPostType(postType: string | undefined, primitiveName: string): void {
+  if (postType !== undefined && postType !== "post" && postType !== "page") {
+    throw new Error(
+      `${primitiveName}: postType "${postType}" is not supported by the governed-invoker retarget ` +
+        '(only the default and "page" have a proven ewpa/* ability behind them — "page" routes to ' +
+        "ewpa/get-page). Custom post types need their own ewpa/get-cpt-item-based primitive, not this one.",
+    );
+  }
 }
 
 /**
@@ -386,6 +410,7 @@ async function readPostViaMcp(
   postId: number,
   postType?: string,
 ) {
+  assertSupportedReadPostType(postType, "wordpress_post_get");
   const ability = postType === "page" ? EWPA_GET_PAGE_ABILITY : EWPA_GET_POST_ABILITY;
   const data = await callEwpaAbility(instance, ability, { post_id: postId });
   const content = extractEwpaContent(data, ability);
@@ -757,6 +782,28 @@ export function createWordPressPrimitiveHandlers() {
       const instances = listInstancesSorted();
       const instance = instances.find((i) => i.id === input.instanceId);
       if (!instance) throw new Error("WordPress instance not found.");
+      // Codex-adopted hardening: refuse an unproven postType BEFORE the
+      // review-gate captures anything below — not at apply time, which would
+      // strand an APPROVED-but-inapplicable review. Unlike the read side
+      // (ewpa/get-page is proven to exist for postType:"page"), there is no
+      // captured schema or execution proving ewpa/update-post accepts a page
+      // id, and no distinct ewpa/update-page ability exists in the pinned
+      // fixture's discovery capture — so "page" is refused here too, not
+      // just arbitrary/CPT postType values.
+      if (input.postType === "page") {
+        throw new Error(
+          'wordpress_post_update: postType "page" is not supported by the governed-invoker retarget — ' +
+            "ewpa/update-post's behavior against a page id has not been proven (no captured schema or " +
+            "execution, and no distinct page-update ability exists in the pinned fixture's discovery " +
+            "capture). Refusing to write rather than guess.",
+        );
+      }
+      if (input.postType !== undefined && input.postType !== "post") {
+        throw new Error(
+          `wordpress_post_update: postType "${input.postType}" is not supported by the governed-invoker ` +
+            "retarget. Custom post types need their own ewpa/get-cpt-item-based primitive, not this one.",
+        );
+      }
       // cinatra#409 — per-user / per-instance write authorization (fail-closed).
       // Transport-independent: it gates BEFORE any write reaches WordPress.
       await requireWriteAuthority(input.instanceId, "wordpress_post_update");
@@ -842,24 +889,26 @@ export function createWordPressPrimitiveHandlers() {
       // byte-identically below.
       if (review.action === "apply") {
         const seam = getWordPressDeps().cmsReview;
-        // INDEPENDENT post-apply RE-READ (a fresh ewpa/get-post call, NOT the
-        // write response): the update ability's own echo carries no content
-        // field at all (see updatePostViaMcp's doc comment) and, even if it
-        // did, echoing what the write requested cannot surface a SITE-PLUGIN
-        // REWRITE-ON-SAVE. Re-reading the persisted remote state is what lets
-        // the read-back verifier catch an out-of-scope rewrite as `drifted`
-        // (a codex convergence finding).
-        const postApply = await readPostViaMcp(instance, input.postId, input.postType);
+        // `applied` IS the post-apply re-read the read-back verifier needs —
+        // NOT the write response's own echo (updatePostViaMcp independently
+        // re-reads via readPostViaMcp internally rather than trusting
+        // ewpa/update-post's echo, which carries no content field at all; see
+        // its doc comment). Re-reading the persisted remote state (never the
+        // request that was sent) is what lets the read-back verifier catch an
+        // out-of-scope rewrite as `drifted` (a codex convergence finding) —
+        // that property holds for `applied` exactly as it would for a SECOND
+        // independent read, so reusing it here (codex-adopted simplification)
+        // drops a redundant WordPress round-trip without weakening the check.
         const readback = seam
           ? await seam.recordApplyVerification({
               operationId: review.operationId,
               gateId: review.gate.gateId,
               runId: review.gate.runId,
               postApplyFields: {
-                title: postApply.title,
-                content: postApply.content,
-                excerpt: postApply.excerpt,
-                status: postApply.status,
+                title: applied.title,
+                content: applied.content,
+                excerpt: applied.excerpt,
+                status: applied.status,
               },
             })
           : { ok: false, code: "seam-unbound" as const };

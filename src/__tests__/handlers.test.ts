@@ -468,20 +468,34 @@ describe("wordpress_post_update", () => {
     expect(res.excerpt).toBe("Applied excerpt");
   });
 
-  it("dispatches ewpa/get-page (not ewpa/get-post) for the post-apply re-read when postType is \"page\"", async () => {
-    await (handlers as any).wordpress_post_update({
-      primitiveName: "wordpress_post_update",
-      input: { instanceId: "site-1", postId: 10, postType: "page", title: "New title" },
-      actor: { actorType: "model", source: "agent" },
-      mode: "agentic",
-    });
-    const readCalls = invokeSiteToolMock.mock.calls.filter((c) => c[0].toolName === "ewpa/get-page");
-    expect(readCalls).toHaveLength(1);
-    // The update ability itself is post-type-agnostic (no page-specific
-    // variant exists in the pinned fixture's discovery capture) — postType is
-    // NOT sent as an update arg.
-    const updateArgs = updateCalls()[0]![0].args as Record<string, unknown>;
-    expect(updateArgs).not.toHaveProperty("postType");
+  // Codex-adopted hardening: unlike the READ side (ewpa/get-page is proven to
+  // exist for postType:"page"), no captured schema or execution proves
+  // ewpa/update-post accepts a page id, and no distinct page-update ability
+  // exists in the pinned fixture's discovery capture — so postType:"page" is
+  // refused for UPDATES, fail-closed, before the review-gate captures
+  // anything (never a silent mis-route to an unproven ability).
+  it('FAILS CLOSED on postType:"page" (page updates are unproven, unlike page reads)', async () => {
+    await expect(
+      (handlers as any).wordpress_post_update({
+        primitiveName: "wordpress_post_update",
+        input: { instanceId: "site-1", postId: 10, postType: "page", title: "New title" },
+        actor: { actorType: "model", source: "agent" },
+        mode: "agentic",
+      }),
+    ).rejects.toThrow(/postType "page" is not supported/);
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  it("FAILS CLOSED on an arbitrary/custom postType (no proven ewpa/* ability behind it)", async () => {
+    await expect(
+      (handlers as any).wordpress_post_update({
+        primitiveName: "wordpress_post_update",
+        input: { instanceId: "site-1", postId: 10, postType: "product", title: "New title" },
+        actor: { actorType: "model", source: "agent" },
+        mode: "agentic",
+      }),
+    ).rejects.toThrow(/postType "product" is not supported/);
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
   });
 });
 
@@ -595,6 +609,18 @@ describe("wordpress_post_get", () => {
       args: { post_id: 7 },
       instanceId: "site-1",
     });
+  });
+
+  // Codex-adopted hardening: an arbitrary/custom postType (a CPT slug) has no
+  // proven ewpa/* ability behind it in this retarget (the pinned fixture's
+  // discovery capture registers SEPARATE ewpa/get-cpt-item(s) abilities for
+  // custom post types, not wired up here) — refuse rather than silently
+  // mis-route it to the post- or page-shaped ability.
+  it("FAILS CLOSED on an arbitrary/custom postType (no proven ewpa/* ability behind it)", async () => {
+    await expect(call({ instanceId: "site-1", postId: 7, postType: "product" })).rejects.toThrow(
+      /postType "product" is not supported/,
+    );
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
   });
 });
 
