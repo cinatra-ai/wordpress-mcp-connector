@@ -474,26 +474,25 @@ function asWordPressInstanceRow(instance: WordPressContentInstanceInput): WordPr
   };
 }
 
-/** The `@cinatra-ai/host:wordpress-content` provider impl — the full existing
- * contract member set, backed by the connector-owned client. */
+/** The `@cinatra-ai/host:wordpress-content` provider impl — backed by the
+ * connector-owned client. cinatra#2022 S7 (PR-κ, following β's re-point of
+ * cinatra core's blog-publish path onto the governed invoker): `createDraft` /
+ * `updateDraftMeta` / `listPublishedPosts` / `listPublishedPages` are RETIRED
+ * here — their backing client methods (`createWordPressDraft` /
+ * `updateWordPressDraftMeta` / `listPublishedWordPressPosts` /
+ * `listPublishedWordPressPages`) were deleted from `wordpress-client.ts` as
+ * call-site-orphaned (org-wide grep confirmed zero callers). `readPostStatus` /
+ * `deletePost` / `uploadMedia` STAY — all three are still actively invoked by
+ * cinatra core (`blog/generation.ts`'s draft-status-refresh + delete-draft
+ * flows, and `blog/wordpress.ts`'s featured-image upload carve-out). */
 function buildWordPressContentProvider(client: WordPressClient) {
   return {
-    createDraft: (input: { instance: WordPressContentInstanceInput; payload: Parameters<WordPressClient["createWordPressDraft"]>[0]["payload"] }) =>
-      client.createWordPressDraft({ instance: asWordPressInstanceRow(input.instance), payload: input.payload }),
     readPostStatus: (input: { instance: WordPressContentInstanceInput; wordpressPostId: number; postType?: string }) =>
       client.readWordPressPostStatus({
         instance: asWordPressInstanceRow(input.instance),
         wordpressPostId: input.wordpressPostId,
         postType: input.postType,
       }),
-    listPublishedPosts: (
-      instance: WordPressContentInstanceInput,
-      options?: { offset?: number; limit?: number },
-    ) => client.listPublishedWordPressPosts(asWordPressInstanceRow(instance), options),
-    listPublishedPages: (
-      instance: WordPressContentInstanceInput,
-      options?: { offset?: number; limit?: number },
-    ) => client.listPublishedWordPressPages(asWordPressInstanceRow(instance), options),
     deletePost: (input: { instance: WordPressContentInstanceInput; wordpressPostId: number; postType?: string }) =>
       client.deleteWordPressPost({
         instance: asWordPressInstanceRow(input.instance),
@@ -506,16 +505,6 @@ function buildWordPressContentProvider(client: WordPressClient) {
       imageMimeType: string;
       title: string;
     }) => client.uploadWordPressMedia({ ...input, instance: asWordPressInstanceRow(input.instance) }),
-    updateDraftMeta: (input: {
-      instance: WordPressContentInstanceInput;
-      wordpressPostId: number;
-      meta: Record<string, unknown>;
-    }) =>
-      client.updateWordPressDraftMeta({
-        instance: asWordPressInstanceRow(input.instance),
-        wordpressPostId: input.wordpressPostId,
-        meta: input.meta,
-      }),
   };
 }
 

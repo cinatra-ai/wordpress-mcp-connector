@@ -159,22 +159,6 @@ export type WordPressWritablePostPayload = {
   featured_media?: number;
 };
 
-type WordPressCreateDraftPayload = {
-  title: string;
-  content: string;
-  excerpt: string;
-  status: "draft";
-  featured_media?: number;
-};
-
-export type WordPressPostListItem = {
-  id: number;
-  title: string;
-  status: string;
-  date: string;
-  url: string;
-};
-
 export type WordPressWebhookSubscription = {
   id: string;
   event_type: string;
@@ -312,18 +296,6 @@ export type WordPressClient = {
     apiResponse: WordPressPostRecord;
     writableTemplate: WordPressWritablePostPayload;
   } | null>;
-  listPublishedWordPressPosts(
-    instance: WordPressInstanceSettings,
-    options?: { offset?: number; limit?: number },
-  ): Promise<{ items: WordPressPostListItem[]; total: number }>;
-  listPublishedWordPressPages(
-    instance: WordPressInstanceSettings,
-    options?: { offset?: number; limit?: number },
-  ): Promise<{ items: WordPressPostListItem[]; total: number }>;
-  createWordPressDraft(input: {
-    instance: WordPressInstanceSettings;
-    payload: WordPressWritablePostPayload;
-  }): Promise<{ wordpressPostId: number; publicUrl?: string; adminUrl: string }>;
   readWordPressPostStatus(input: {
     instance: WordPressInstanceSettings;
     wordpressPostId: number;
@@ -334,11 +306,6 @@ export type WordPressClient = {
     wordpressPostId: number;
     postType?: string;
   }): Promise<{ deleted: boolean; previousStatus?: string }>;
-  updateWordPressDraftMeta(input: {
-    instance: WordPressInstanceSettings;
-    wordpressPostId: number;
-    meta: Record<string, unknown>;
-  }): Promise<unknown>;
   /**
    * Resolve the Application-Password Basic auth for an instance (Nango
    * credential + the #1077 instance-connection use-gate + audit
@@ -1147,106 +1114,6 @@ export function createWordPressClient(ctx: ExtensionHostContext): WordPressClien
     };
   }
 
-  // ---------------------------------------------------------------------------
-  // List published posts / pages — metadata-only, cursor-paginated
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Shared metadata-only, offset-paginated published-content lister. Posts and
-   * pages differ ONLY by the REST collection route (`/posts` vs `/pages`) and
-   * the capture label — the query params, the `x-wp-total` pagination read, and
-   * the `{ id, title, status, date, url }` projection are identical. The
-   * `listPublishedWordPressPosts` / `listPublishedWordPressPages` members are
-   * thin wrappers so each stays a distinct, self-describing client method (and
-   * the pages primitive routes to `/wp/v2/pages`, mirroring the read/update
-   * post-type routing).
-   */
-  async function listPublishedWordPressContent(
-    instance: WordPressInstanceSettings,
-    options: { offset?: number; limit?: number },
-    collection: { route: "/posts" | "/pages"; label: string; noun: string },
-  ): Promise<{ items: WordPressPostListItem[]; total: number }> {
-    const auth = await resolveWordPressBasicAuth(instance);
-    const limit = Math.max(1, Math.min(100, options.limit ?? 10));
-    const offset = Math.max(0, options.offset ?? 0);
-    const params = new URLSearchParams({
-      context: "edit",
-      status: "publish",
-      per_page: String(limit),
-      offset: String(offset),
-      orderby: "date",
-      order: "desc",
-      _fields: "id,title,status,date,link",
-    });
-    await writeWordPressLogFile({
-      label: collection.label,
-      kind: "request",
-      body: {
-        endpoint: buildRESTEndpoint(instance.siteUrl, collection.route, params),
-        method: "GET",
-        siteUrl: instance.siteUrl,
-        username: auth.username,
-        offset,
-        limit,
-      },
-    });
-    const response = await fetchWithTimeout(buildRESTEndpoint(instance.siteUrl, collection.route, params), {
-      method: "GET",
-      headers: {
-        Authorization: auth.authHeader,
-        Accept: "application/json",
-      },
-      cache: "no-store",
-    });
-
-    const payload = (await response.json().catch(() => null)) as Array<WordPressPostRecord> | { message?: string } | null;
-    const totalHeader = response.headers.get("x-wp-total");
-    const total = totalHeader ? parseInt(totalHeader, 10) : 0;
-    await writeWordPressLogFile({
-      label: collection.label,
-      kind: "response",
-      body: { status: response.status, total, count: Array.isArray(payload) ? payload.length : 0 },
-    });
-    if (!response.ok) {
-      const message = !Array.isArray(payload) && payload?.message
-        ? payload.message
-        : `Unable to list WordPress ${collection.noun}.`;
-      throw new Error(message);
-    }
-
-    const rows = Array.isArray(payload) ? payload : [];
-    const items: WordPressPostListItem[] = rows.map((post) => ({
-      id: typeof post.id === "number" ? post.id : 0,
-      title: extractRenderedText(post.title),
-      status: typeof post.status === "string" ? post.status : "publish",
-      date: typeof post.date === "string" ? post.date : "",
-      url: typeof post.link === "string" ? post.link : "",
-    }));
-    return { items, total: Number.isFinite(total) ? total : items.length };
-  }
-
-  async function listPublishedWordPressPosts(
-    instance: WordPressInstanceSettings,
-    options: { offset?: number; limit?: number } = {},
-  ): Promise<{ items: WordPressPostListItem[]; total: number }> {
-    return listPublishedWordPressContent(instance, options, {
-      route: "/posts",
-      label: "wordpress-posts-list",
-      noun: "posts",
-    });
-  }
-
-  async function listPublishedWordPressPages(
-    instance: WordPressInstanceSettings,
-    options: { offset?: number; limit?: number } = {},
-  ): Promise<{ items: WordPressPostListItem[]; total: number }> {
-    return listPublishedWordPressContent(instance, options, {
-      route: "/pages",
-      label: "wordpress-pages-list",
-      noun: "pages",
-    });
-  }
-
   function buildWritableWordPressPostPayload(post?: WordPressPostRecord | null): WordPressWritablePostPayload {
     return {
       title: extractRenderedText(post?.title),
@@ -1264,64 +1131,6 @@ export function createWordPressClient(ctx: ExtensionHostContext): WordPressClien
       tags: Array.isArray(post?.tags) ? post.tags.filter((value): value is number => typeof value === "number") : undefined,
       meta: post?.meta && typeof post.meta === "object" ? post.meta : undefined,
       featured_media: typeof post?.featured_media === "number" ? post.featured_media : undefined,
-    };
-  }
-
-  function buildCreateDraftPayload(payload: WordPressWritablePostPayload): WordPressCreateDraftPayload {
-    return {
-      title: payload.title,
-      content: payload.content,
-      excerpt: payload.excerpt,
-      status: "draft",
-      featured_media: typeof payload.featured_media === "number" ? payload.featured_media : undefined,
-    };
-  }
-
-  async function createWordPressDraft(input: {
-    instance: WordPressInstanceSettings;
-    payload: WordPressWritablePostPayload;
-  }) {
-    const auth = await resolveWordPressBasicAuth(input.instance);
-    const createPayload = buildCreateDraftPayload(input.payload);
-    await writeWordPressLogFile({
-      label: "wordpress-create-draft",
-      kind: "request",
-      body: {
-        endpoint: buildRESTEndpoint(input.instance.siteUrl, "/posts"),
-        method: "POST",
-        siteUrl: input.instance.siteUrl,
-        username: auth.username,
-        body: createPayload,
-      },
-    });
-    const response = await fetchWithTimeout(buildRESTEndpoint(input.instance.siteUrl, "/posts"), {
-      method: "POST",
-      headers: {
-        Authorization: auth.authHeader,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify(createPayload),
-      cache: "no-store",
-    });
-
-    const payload = (await response.json().catch(() => null)) as { id?: number; link?: string; message?: string } | null;
-    await writeWordPressLogFile({
-      label: "wordpress-create-draft",
-      kind: "response",
-      body: {
-        status: response.status,
-        body: payload,
-      },
-    });
-    if (!response.ok || !payload?.id) {
-      throw new Error(payload?.message || "Unable to create the WordPress draft.");
-    }
-
-    return {
-      wordpressPostId: payload.id,
-      publicUrl: payload.link,
-      adminUrl: `${normalizeSiteUrl(input.instance.siteUrl)}/wp-admin/post.php?post=${payload.id}&action=edit`,
     };
   }
 
@@ -1441,56 +1250,6 @@ export function createWordPressClient(ctx: ExtensionHostContext): WordPressClien
     };
   }
 
-  async function updateWordPressDraftMeta(input: {
-    instance: WordPressInstanceSettings;
-    wordpressPostId: number;
-    meta: Record<string, unknown>;
-  }) {
-    const auth = await resolveWordPressBasicAuth(input.instance);
-    await writeWordPressLogFile({
-      label: "wordpress-update-draft-meta",
-      kind: "request",
-      body: {
-        endpoint: buildRESTEndpoint(input.instance.siteUrl, `/posts/${input.wordpressPostId}`),
-        method: "POST",
-        siteUrl: input.instance.siteUrl,
-        username: auth.username,
-        body: {
-          meta: input.meta,
-        },
-      },
-    });
-
-    const response = await fetchWithTimeout(buildRESTEndpoint(input.instance.siteUrl, `/posts/${input.wordpressPostId}`), {
-      method: "POST",
-      headers: {
-        Authorization: auth.authHeader,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({
-        meta: input.meta,
-      }),
-      cache: "no-store",
-    });
-
-    const payload = (await response.json().catch(() => null)) as { id?: number; message?: string } | null;
-    await writeWordPressLogFile({
-      label: "wordpress-update-draft-meta",
-      kind: "response",
-      body: {
-        status: response.status,
-        body: payload,
-      },
-    });
-
-    if (!response.ok || !payload?.id) {
-      throw new Error(payload?.message || "Unable to update the WordPress draft template metadata.");
-    }
-
-    return payload;
-  }
-
   // cinatra#1214 S1 — the direct-REST in-admin get/update helpers
   // (`updateWordPressPost` → `POST /wp/v2/(posts|pages)/{id}` and
   // `readWordPressPost` → `GET /wp/v2/(posts|pages)/{id}?context=edit`) were
@@ -1499,9 +1258,16 @@ export function createWordPressClient(ctx: ExtensionHostContext): WordPressClien
   // (cinatra-ai/cinatra#2022 PR-θ) after their transport was retargeted onto
   // the governed connector-instance invoker (`ewpa/get-post` /
   // `ewpa/update-post`, PR-τ) — no direct `/wp/v2/*` egress with a stored
-  // credential ever came back on the in-admin path. The carve-out members
-  // (createDraft / uploadMedia / updateDraftMeta / deletePost / readPostStatus /
-  // listPublished*) keep their direct-REST path per the design §C carve-out.
+  // credential ever came back on the in-admin path. The remaining carve-out
+  // members (uploadMedia / deletePost / readPostStatus) keep their direct-REST
+  // path per the design §C carve-out; `createDraft` / `updateDraftMeta` /
+  // `listPublished*` were retired alongside them (cinatra#2022 S7 — those
+  // three legs re-pointed onto the governed invoker from cinatra core's
+  // blog-publish path, PR-β, leaving no caller for the direct-REST versions;
+  // `readLatestPublishedWordPressPost` stays even though its OWN blog-publish
+  // call site also moved to the invoker — it remains a required member of the
+  // `@cinatra-ai/host:wordpress-mcp` capability's structural guard in cinatra
+  // core, `connector-client-providers.ts`'s `isWordPressInstanceAdminClient`).
   // `resolveWordPressBasicAuth` is now ALSO exposed (below, in the return) as
   // the MCP client's Basic-auth seam.
 
@@ -1885,12 +1651,8 @@ export function createWordPressClient(ctx: ExtensionHostContext): WordPressClien
     saveWordPressLoggingSettings,
     listWordPressInstances,
     readLatestPublishedWordPressPost,
-    listPublishedWordPressPosts,
-    listPublishedWordPressPages,
-    createWordPressDraft,
     readWordPressPostStatus,
     deleteWordPressPost,
-    updateWordPressDraftMeta,
     resolveWordPressBasicAuth,
     uploadWordPressMedia,
     listWordPressWebhookSubscriptions,

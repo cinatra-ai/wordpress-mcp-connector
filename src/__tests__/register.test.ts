@@ -415,15 +415,20 @@ describe("register(ctx) — relocated WordPress client provider-flip (cinatra#97
     // The existing HostWordPressContentService member set MINUS the in-admin
     // readPost/updatePost, which cinatra#1214 S1 RETIRED (the get/update reroute
     // to the MCP client — the client no longer has readWordPressPost/
-    // updateWordPressPost to back them).
-    for (const member of [
-      "createDraft", "readPostStatus", "listPublishedPosts",
-      "listPublishedPages", "deletePost", "uploadMedia", "updateDraftMeta",
-    ]) {
+    // updateWordPressPost to back them), MINUS createDraft/updateDraftMeta/
+    // listPublishedPosts/listPublishedPages, RETIRED by cinatra#2022 S7 PR-κ
+    // (their backing wordpress-client.ts methods were deleted as call-site-
+    // orphaned once cinatra core's blog-publish path re-pointed onto the
+    // governed invoker, PR-β — org-wide grep confirmed zero remaining callers).
+    for (const member of ["readPostStatus", "deletePost", "uploadMedia"]) {
       expect(typeof content[member], `wordpress-content.${member}`).toBe("function");
     }
     expect(content.readPost, "wordpress-content.readPost retired (S1)").toBeUndefined();
     expect(content.updatePost, "wordpress-content.updatePost retired (S1)").toBeUndefined();
+    expect(content.createDraft, "wordpress-content.createDraft retired (S7 PR-κ)").toBeUndefined();
+    expect(content.updateDraftMeta, "wordpress-content.updateDraftMeta retired (S7 PR-κ)").toBeUndefined();
+    expect(content.listPublishedPosts, "wordpress-content.listPublishedPosts retired (S7 PR-κ)").toBeUndefined();
+    expect(content.listPublishedPages, "wordpress-content.listPublishedPages retired (S7 PR-κ)").toBeUndefined();
 
     const admin = registeredImpl(registerProvider, "@cinatra-ai/host:wordpress-mcp");
     // Client-backed contract members…
