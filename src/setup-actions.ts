@@ -10,7 +10,13 @@
 // `@/lib/wordpress-api` edge), so there is NO `@/lib/*` import here.
 
 import { requireExtensionAction } from "@cinatra-ai/sdk-extensions";
-import { getWordPressDeps, type InstallCatalogPluginOutcome } from "./deps";
+import {
+  getWordPressDeps,
+  type InstallCatalogPluginOutcome,
+  type InstanceToolPolicyMode,
+  type SetInstanceToolPolicyOutcome,
+  type SiteToolPolicyRef,
+} from "./deps";
 
 const WORDPRESS_PACKAGE_ID = "@cinatra-ai/wordpress-mcp-connector";
 
@@ -102,4 +108,100 @@ export async function installCatalogPluginRemoteAction(
   }
 
   return deps.installCatalogPluginRemote(instanceId);
+}
+
+// cinatra-ai/cinatra#2022 S7 — replace a WordPress instance's per-site tool
+// selection (which of the site's own MCP tools Cinatra may call for it).
+// `manage`-gated like every sibling action here, and gated a SECOND time
+// host-side inside the setter (org-admin on the instance's OWNING org,
+// resolved from the persisted row — never from this form). The form carries
+// the instance id and ONE `policy` field: a JSON document of the FULL desired
+// record `{mode, allow, deny}` — never a delta, so a stale card can never
+// half-apply an edit on top of state it hasn't seen. Validation here is
+// shape-strict and mirrors the host seam's own rules (unknown modes and
+// malformed `{serverId, name}` entries are refused before any call), so a
+// crafted form fails as a rendered refusal, not a crash — and the host seam
+// re-validates regardless (defense in depth, connector input is never
+// trusted).
+const TOOL_POLICY_MAX_REFS_PER_LIST = 500;
+
+function parseToolPolicyRefList(value: unknown): SiteToolPolicyRef[] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > TOOL_POLICY_MAX_REFS_PER_LIST) return null;
+  const refs: SiteToolPolicyRef[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") return null;
+    const raw = entry as Record<string, unknown>;
+    const serverId = typeof raw.serverId === "string" ? raw.serverId.trim() : "";
+    const name = typeof raw.name === "string" ? raw.name.trim() : "";
+    if (!serverId || !name) return null;
+    refs.push({ serverId, name });
+  }
+  return refs;
+}
+
+export async function setWordPressInstanceToolPolicyAction(
+  formData: FormData,
+): Promise<SetInstanceToolPolicyOutcome> {
+  await requireExtensionAction(WORDPRESS_PACKAGE_ID, "manage");
+
+  const instanceId = String(formData.get("instanceId") ?? "").trim();
+  if (!instanceId) {
+    // Typed outcome, not a throw (the remote-assist contract): every
+    // post-authorization failure resolves a renderable result.
+    return { ok: false, message: "Missing WordPress instance id." };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(String(formData.get("policy") ?? ""));
+  } catch {
+    return { ok: false, message: "Invalid tool-selection payload." };
+  }
+  if (!parsed || typeof parsed !== "object") {
+    return { ok: false, message: "Invalid tool-selection payload." };
+  }
+  const record = parsed as Record<string, unknown>;
+  const mode = record.mode;
+  if (mode !== "open" && mode !== "restricted") {
+    return { ok: false, message: "Invalid tool-selection mode." };
+  }
+  const allow = parseToolPolicyRefList(record.allow);
+  const deny = parseToolPolicyRefList(record.deny);
+  if (allow === null || deny === null) {
+    return { ok: false, message: "Invalid tool entries in the tool selection." };
+  }
+
+  const deps = getWordPressDeps();
+  if (typeof deps.setInstanceToolPolicy !== "function") {
+    return {
+      ok: false,
+      message: "This Cinatra version does not support per-site tool selection.",
+    };
+  }
+
+  try {
+    // BOTH lists are ALWAYS sent explicitly — never dropped when empty — so
+    // the wire payload is unambiguous: "clear this list" and "leave this
+    // list alone" can never share a shape. (The host seam is a full-record
+    // replace either way — its normaliser maps an explicit-empty and an
+    // omitted list to the same persisted NULL and its upsert always
+    // overwrites both columns, so a clear persists regardless; sending both
+    // keeps that true by inspection rather than by contract archaeology.)
+    const policy = await deps.setInstanceToolPolicy({
+      instanceId,
+      mode: mode as InstanceToolPolicyMode,
+      allow,
+      deny,
+    });
+    return { ok: true, policy };
+  } catch {
+    // The host refusal is deliberately opaque (no instance-existence oracle);
+    // mirror that here — one honest, generic refusal message, no internals.
+    return {
+      ok: false,
+      message:
+        "Saving the tool selection was refused. You need to be an admin of the organization that owns this site.",
+    };
+  }
 }

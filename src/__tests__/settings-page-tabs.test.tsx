@@ -73,6 +73,18 @@ vi.mock("../wordpress-remote-assist-install-card", () => ({
   ),
 }));
 
+// The site-tools card (cinatra-ai/cinatra#2022 S7) has its own test file
+// (wordpress-site-tools-card.test.tsx); stub it here for the same reason as
+// the cards above. The badge-derivation helper the page's per-instance header
+// consumes from the same module is stubbed to the legacy label so this test
+// stays scoped to the tab contract.
+vi.mock("../wordpress-site-tools-card", () => ({
+  WordPressSiteToolsCard: () => (
+    <div data-testid="site-tools-card-stub">Site tools &amp; access</div>
+  ),
+  deriveSiteConnectionBadge: () => ({ variant: "success" as const, label: "Connected" }),
+}));
+
 import { WordPressSettingsPage } from "../settings-page";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
