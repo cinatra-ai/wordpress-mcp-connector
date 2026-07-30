@@ -1,57 +1,57 @@
-# connector-wordpress — AGENTS.md
+# wordpress-mcp-connector — AGENTS.md
 
-Package-specific guidance for `@cinatra-ai/wordpress-connector`. Read alongside the repo-root `AGENTS.md` and `packages/connector-drupal/AGENTS.md` (the Drupal connector is the reference pattern).
+Package-specific guidance for `@cinatra-ai/wordpress-mcp-connector`. This is a standalone, extracted extension repo (a source mirror, per `.github/workflows/ci.yml`) — there is no monorepo `packages/connector-wordpress` tree to read alongside; this file is self-contained. (`@cinatra-ai/wordpress-connector`, without `-mcp-`, is the old, fully-removed package name — do not reintroduce it; the cinatra host bans the import.)
 
 ## Package role
 
-Exposes MCP primitives that call the WordPress REST API (`/wp/v2/*`) on each configured WordPress site. Also provides the `WordPressSettingsPage` RSC for `/configuration/llm/wordpress` and wires into `src/lib/mcp-server.ts` via `createWordPressModule()`.
+Registers via `createWordPressModule()` (`src/mcp/module.ts`), which returns `{ registerCapabilities: registerWordPressPrimitives }` — exported from `src/index.ts` and the `./mcp-module` package subpath for the host to consume. Deps wiring is separate: `cinatra.serverEntry: "./register"` (`package.json`) binds `src/register.ts`'s `register(ctx)`, which adapts host capabilities into this connector's runtime `WordPressConnectorDeps` (`src/deps.ts`) — it does not itself register any MCP tool. The connector exposes two governed, model-visible MCP primitives — `wordpress_site_tool_call` and `wordpress_site_tools_list` — that forward to whatever ability a connected site's own MCP catalog advertises, rather than calling `/wp/v2/*` directly. A fixed set of direct-REST members survive as carve-outs (see below). It also provides the `WordPressSettingsPage` RSC (`src/settings-page.tsx`) for the connector's settings page.
 
-Provides `wordpress_content_editor_run` (A2A blocking dispatch to WayFlow) and `wordpress_post_update` (top-level REST update). `wordpress_post_update_meta` writes only the `meta` field and is a separate primitive — do not merge them.
+## The generic catalog invoker replaced the 12 named tools
 
-## Key primitive asymmetry vs. Drupal
+cinatra-ai/cinatra#2022 (S7) deleted the 12 named per-operation tools this connector used to expose — `wordpress_status`, `wordpress_instances_list`, `wordpress_post_create_draft`, `wordpress_post_status`, `wordpress_post_delete`, `wordpress_media_upload`, `wordpress_posts_list`, `wordpress_pages_list`, `wordpress_post_get_latest`, `wordpress_post_get`, `wordpress_post_update_meta`, `wordpress_post_update` (PR #101). Every caller now reaches a connected site's own MCP catalog through two primitives only:
 
-| Feature | Drupal | WordPress |
-|---------|--------|-----------|
-| Draft-before-edit | `drupal_node_create_draft_revision` (true draft revision) | `wordpress_post_update(status: "draft")` — **demote-then-edit** (no true revision API) |
-| Read by ID | `mcp_tools_search_content` (search proxy) | `/wp/v2/posts/{id}?context=edit` (direct REST lookup) |
-| Auth | Bearer token (MCP key) | Basic auth (username + application password) |
-| postId type | string (Drupal node IDs may be alphanumeric) | **number** (WordPress always uses numeric IDs) |
+- `wordpress_site_tools_list` — list the site's own catalog (paginated; `instanceId` required only when the session isn't pinned to a single site).
+- `wordpress_site_tool_call` — call an ability by that catalog's own `toolName` (e.g. `ewpa/get-post`, `ewpa/update-post`), forwarding `args` unmodified to the site.
 
-## `postId` must be a positive integer — always coerce
+Both are thin wrappers over the governed connector-instance invoker (`src/deps.ts`'s `invokeSiteTool` / `listSiteTools`, host capability `@cinatra-ai/host:connector-instance-invoker`) — see `src/mcp/handlers.ts` and `src/mcp/registry.ts`. `docs/external-mcp-adapter-pages.md` has the current walkthrough of which ability ids a community "Enable Abilities for MCP" catalog exposes for posts/pages, and what still has no supported path (page editing).
 
-Widget sends `String(postId)`. All WordPress handlers that accept a post ID use:
+## The content-review gate now lives on the generic path — `ewpa/update-post` only
 
-```typescript
-z.coerce.number().int().positive()
-```
+The old `wordpress_post_update` tool's inline review-before-publish trigger (`evaluateStagedContentWrite`, cinatra#2043) was relocated (PR #100) onto `wordpress_site_tool_call` itself, keyed on ability name, before the old tool was deleted (PR #101) — the no-silent-publish guarantee never lapsed for one commit. `CONTENT_REVIEW_TARGET_ABILITIES` (`src/mcp/handlers.ts`) is `{"ewpa/update-post"}` — the only ability gated today. When `wordpress_site_tool_call` is called with that `toolName`:
 
-This is required at the Zod schema level. Do not accept raw strings for `postId` — WordPress REST endpoints embed the ID in the URL path and will 404 on non-numeric values.
+- `instanceId` is required unconditionally (no session-pin fallback) — refuses rather than stage an unattributable review.
+- `args.post_id` must be a strict positive integer (`Number.isInteger`, the same semantics as `z.coerce.number().int().positive()` — including accepting an exponential-but-integral string like `"1e2"`).
+- `args.meta` is refused outright — meta writes go through `wordpress_site_tool_call` again with `toolName: "ewpa/update-post-meta"` (list the catalog first); they are never folded into the reviewed post payload.
+- Any argument outside `post_id`/`title`/`content`/`excerpt`/`status` is refused before any capture, so an out-of-scope field can never ride an unchanged-content "pass" verdict onto WordPress unreviewed.
+- On hold/reject the mutating call is never forwarded; on pass/apply it forwards `args` unmodified, then (on `apply`) records a post-apply read-back via `readPostViaMcp` — never trusting the ability's own write-response echo.
 
-## `readWordPressPost` returns `content`
+Every OTHER ability reachable through `wordpress_site_tool_call` is not content-review-gated today. Widening the keyed set (e.g. a future `ewpa/create-post`) is a deliberate, separate change — do not assume it is already covered.
 
-`src/lib/wordpress-api.ts:readWordPressPost` fetches with `context=edit` so the response includes `content.raw`. The return value includes `content: payload.content?.raw ?? payload.content?.rendered ?? ""`. This is required by the `wordpress-content-editor` SKILL.md Step 1 for before/after diff construction.
+## `post_id` / `postId` — no single universal rule anymore
 
-If you add a new field to the `WordPressPostRecord` type, also forward it in `readWordPressPost`'s return statement. Omitting a field silently prevents the agent from building accurate diffs.
+There is no longer one schema-level constant across every WordPress primitive:
 
-## `wordpress_post_update` — at-least-one-field constraint
+- `wordpress_content_editor_run`'s schema (`src/mcp/relay.ts`) still declares `postId: z.coerce.number().int().positive()` — the widget sends `String(postId)`, and `.coerce` makes that work.
+- The review-gated `ewpa/update-post` path validates the snake_case `post_id` argument by hand inside `callReviewGatedSiteTool` (`src/mcp/handlers.ts`) — `siteToolCallSchema.args` is a generic `z.record(z.string(), z.unknown())`, so Zod can't apply a typed constraint to one key inside it.
+- No other ability gets any id validation from this connector at all — `wordpress_site_tool_call` forwards `args` unmodified to whatever the target ability's own schema expects.
 
-`postUpdateSchema` uses `.refine(...)` to require at least one of `title`, `content`, `excerpt`, `status`, or `meta`. This prevents silent no-ops. Do not relax this — if the LLM sends an empty update, it should fail fast with a descriptive error.
+## Reading a post for the review trigger — `readPostViaMcp` / `extractEwpaContent`
 
-Status is constrained to a Zod enum: `z.enum(["publish", "future", "draft", "pending", "private"])`. Do not accept arbitrary status strings.
+`readPostViaMcp` (`src/mcp/handlers.ts`) — not `src/lib/wordpress-api.ts`, which does not exist in this repo (cinatra#975 relocated it here as `src/lib/wordpress-client.ts`, and cinatra#1214 S1 later deleted its direct-REST post read/update helpers) — fetches a post/page through the governed invoker (`ewpa/get-post` / `ewpa/get-page`) for the review trigger's current-content fetch and post-apply read-back. `extractEwpaContent` checks `post_content` then `content` and **throws** if neither key is present; it never silently coerces missing content to `""`. `assertSupportedReadPostType` only allows `undefined`/`"post"`/`"page"` — a custom post type is refused rather than mis-routed (custom post types have their own `ewpa/get-cpt-item*` abilities this connector does not wire up).
 
-## `wordpress_content_editor_run` — A2A blocking dispatch
+If you add a field the review trigger needs, extend `readPostViaMcp`'s return shape — the trigger's current-content fetch and its post-apply read-back both depend on it.
+
+## `wordpress_content_editor_run` — A2A blocking dispatch, not a listed MCP tool
 
 Dispatches to `wayflow-wordpress-content-editor` (default `http://localhost:3010/agents/cinatra-ai/wordpress-agent`, overridable via the `content_editor_a2a_url` connector setting read through the `settings` host port — connector code never reads `process.env`). Uses `timeoutMs: 300_000` (5 minutes). Reads the result from `task.history` — never `task.artifacts` (WayFlow does not implement `task.artifacts`). Strips Markdown code fences before `JSON.parse`.
 
+It is **not** a model-visible MCP tool. cinatra#246 extracted it into its own module (`src/mcp/relay.ts`) that is deliberately never wired into `createWordPressPrimitiveHandlers()` / `registerWordPressPrimitives()` — so it is structurally impossible for it to reach `tools/list`. An agent with the Cinatra MCP server injected would otherwise see the tool name and call it, re-dispatching itself (observed: recursive `mcp_call` → 504). Callers (`src/widget-chat-tool.ts`) import `runContentEditorRelay` directly. `src/__tests__/registry-omission.test.ts` is the regression guard.
+
 ## Tests
 
-Tests live in `src/__tests__/` (currently `handlers.test.ts`, `wordpress-api.test.ts`, and `content-editor-run.test.ts`). Run from the package directory:
+Tests live in `src/__tests__/` (e.g. `handlers.test.ts`, `wordpress-client.test.ts`, `site-tool-review-trigger.test.ts`, `toolbox.test.ts` — avoid hard-coding the full list or a count here, it drifts as tests evolve). Most tests build a plain `WordPressConnectorDeps` object (`vi.fn()` stubs) and call `registerWordPressConnector(deps)` directly — no `vi.mock()` module interception needed, since nearly everything now reaches the host through the `src/deps.ts` DI slot. A few files (e.g. `setup-actions.test.ts`) still need `vi.mock()` for a module-level import; there, factory closures must be hoisted above import evaluation via `vi.hoisted()` — do not use a bare `const` outside `vi.hoisted()` for a mock variable a `vi.mock()` factory closes over.
 
-```bash
-cd packages/connector-wordpress && pnpm vitest run --no-coverage
-```
-
-Avoid hard-coding a per-file or total test count here — it drifts as tests evolve. All mocks use `vi.hoisted()` — factory closures must be hoisted above import evaluation. Do not use bare `const` outside `vi.hoisted()` for mock variables in `vi.mock()` factories.
+This repo cannot run its test suite standalone: it is a source mirror (`.github/workflows/ci.yml` skips standalone install/typecheck/test whenever a package declares host-internal `@cinatra-ai/*` peers, which this one does), and `vitest.config.ts`'s aliases (`@/`, `server-only`) resolve three directories up from this file — they assume the repo is checked out inside the cinatra host tree, not standalone. Validate a change here with `node --check` on touched files and `node extension-kind-gate.mjs --package-root .`; treat the cinatra host's own CI Typecheck/Test jobs as authoritative once this connector is embedded there.
 
 ## Adding new primitives
 
@@ -59,50 +59,27 @@ Avoid hard-coding a per-file or total test count here — it drifts as tests evo
 2. Add the handler to `createWordPressPrimitiveHandlers()`.
 3. Add the tool metadata entry to `TOOL_META` in `registry.ts`.
 4. Add a test case to `handlers.test.ts`.
-5. Run `pnpm typecheck` and `pnpm vitest run` from the package root.
+5. There is no `pnpm typecheck` script in this repo (`package.json` only declares `test` and `lint`) — run `pnpm lint` (eslint) locally; the cinatra host's CI Typecheck/Test jobs are authoritative here (see "Tests" above).
 
-## REST endpoint routing by post type
+## Post-type routing
 
-WordPress REST API separates content by post type:
+Reads route post vs. page distinctly at two different layers:
 
-- **Posts** (`post_type: post`): `/wp/v2/posts/{id}`
-- **Pages** (`post_type: page`): `/wp/v2/pages/{id}`
-- **Custom post types**: `/wp/v2/{type}/{id}`
+- The governed-invoker read (`readPostViaMcp`) dispatches `postType === "page"` to `ewpa/get-page`, everything else to `ewpa/get-post` — the pinned-fixture discovery capture registers them as distinct abilities.
+- The direct-REST carve-outs (`readWordPressPostStatus`, `deleteWordPressPost` in `src/lib/wordpress-client.ts`) route `postType === "page"` to `/wp/v2/pages/{id}`, else `/wp/v2/posts/{id}`.
 
-`readWordPressPost` and `updateWordPressPost` in `src/lib/wordpress-api.ts` both accept an optional `postType` parameter. When `postType === "page"`, they route to `/wp/v2/pages/{id}`. Thread `postType` from widget context → schema → handler → API function. Missing `postType` defaults to `"post"`.
+**No page-specific update ability exists.** `ewpa/update-post` is post-type-agnostic (WordPress core's `wp_update_post()` doesn't distinguish), so the review-gated write path always targets the post-shaped read ability for its current-content fetch and post-apply read-back, regardless of whether the resource is actually a page. `docs/external-mcp-adapter-pages.md` covers the practical fallout: page editing has no known supported ability today.
 
-Both `postStatusSchema` (`wordpress_post_get`) and `postUpdateSchema` (`wordpress_post_update`) include `postType: z.string().optional()`. The WayFlow SKILL.md instructs the agent to always pass `postType` to both tools.
+## Empty-field handling — scoped to the reviewed write only
 
-## Empty-field injection guard
+There is no longer a connector-wide "never write an empty field" guard covering every write. The one place it survives:
 
-WordPress applies field values literally — `content: ""` deletes the post body. LLMs observed passing empty strings for fields they did not intend to change (title-only edit sent `content: ""`, wiping the body).
+- `resolveProposedState` (`src/integration/cms-review-trigger.ts`) drops an empty-string `content`/`excerpt` proposal as "not proposed" before diffing against current — WordPress applies `content: ""` as a literal wipe, so a title-only edit that also carries `content: ""` is treated as not touching content.
+- This only runs on the review-gated `ewpa/update-post` path (see above). Every other ability reached through `wordpress_site_tool_call` gets `args` forwarded unmodified — whatever that ability does with an empty string is between the caller and the site, not something this connector guards.
 
-### `wordpress_post_update` — two-layer defence
+## Direct-REST carve-outs
 
-1. **Schema** — `postUpdateSchema.content` is `z.string().min(1).optional()`. Empty string fails validation; agent retries without the field.
-2. **API layer** — `updateWordPressPost` skips `content` and `excerpt` if their value is an empty string, even if validation somehow passes.
-
-`agents/wordpress-content-editor/skills/wordpress-content-editor/SKILL.md` explicitly warns against passing empty strings for unchanged fields. Keep this warning in sync with any schema changes.
-
-### `wordpress_post_update_meta` — runtime strip filter + all-empty guard
-
-`wordpress_post_update_meta` receives `meta: z.record(z.string(), z.unknown())`. Zod cannot apply per-key `min(1)` guards to free-form records. The runtime guard filters empty strings before dispatch:
-
-```typescript
-const safeMeta = Object.fromEntries(
-  Object.entries(meta).filter(([, v]) => v !== ""),
-);
-if (Object.keys(safeMeta).length === 0) {
-  throw new Error("No meta fields provided.");
-}
-return updateWordPressDraftMeta({ instance, wordpressPostId: postId, meta: safeMeta });
-```
-
-The filter uses strict equality on `""` so `null`, `false`, and `0` pass through unchanged — legitimate meta clears keep working.
-
-### Watch: `wordpress_post_update.meta` path is **not filtered**
-
-`wordpress_post_update` accepts an optional `meta: Record<string, unknown>` field. This path goes directly to the WordPress REST PATCH body — there is **no empty-string strip filter** on the meta sub-object. If the LLM passes `{ meta: { "_some_key": "" } }` via `wordpress_post_update`, WordPress will write the empty string to that meta key. The empty-string filters only cover the dedicated `wordpress_post_update_meta` primitive. If meta editing is added via `wordpress_post_update`, apply the same `Object.entries(...).filter(([, v]) => v !== "")` pattern to the meta sub-object before dispatch.
+`src/lib/wordpress-client.ts` still calls `/wp/v2/*` directly (Basic auth via `resolveWordPressBasicAuth`) for a fixed set of members that never moved onto the governed invoker: `uploadWordPressMedia`, `deleteWordPressPost`, `readWordPressPostStatus`, `readLatestPublishedWordPressPost`, instance CRUD/validation (`saveWordPressInstance`, `validateWordPressInstanceConnection`, …), and webhook subscription management. `createDraft`, `updateDraftMeta`, and the `listPublished*` helpers were retired in the same cutover (PR #102) once their only callers (cinatra core's blog-publish path) moved onto the invoker — an org-wide grep found zero remaining callers of any of them.
 
 ## Widget chat tool factory
 
@@ -110,6 +87,6 @@ The filter uses strict equality on `""` so `null`, `false`, and `0` pass through
 
 - Wrapped as an `LlmFunctionTool` and passed to `stream` in `src/app/api/agents/[agentSlug]/stream/route.ts`.
 - Security: `instanceId` and `postId` are **forcibly overridden** from the server-trusted request context inside `execute()` — any LLM-supplied identity values are dropped. The tool schema only exposes `instructions`.
-- Calls `wordpress_content_editor_run` in-process (not via MCP network round-trip).
+- Calls `runContentEditorRelay` in-process (not via an MCP network round-trip, and not by looking up `wordpress_content_editor_run` as a tool name — that name is never registered; see above).
 
 The widget-routing skill lives in the `@cinatra-ai/wordpress-widget-chat-skill` extension at `extensions/cinatra-ai/wordpress-widget-chat-skill/skills/wordpress-widget-chat/SKILL.md` (skill id: `@cinatra-ai/wordpress-widget-chat-skill:wordpress-widget-chat`). This connector reaches it through the declared runtime dependency edge in `package.json`; it ships no bundle of its own, and `cinatra.widgetStream.skillCapability` names the `widget-chat.wordpress-content-editor` capability that the skill package provides.
