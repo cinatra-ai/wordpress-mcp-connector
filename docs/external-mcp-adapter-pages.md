@@ -43,14 +43,20 @@ ability**, so:
 
 ## Which path to use for pages
 
-**Use the Cinatra-owned primitives with `postType: "page"`.** They cover the
-whole page lifecycle and route to `/wp/v2/pages/{id}`:
+**Use the Cinatra-owned primitives with `postType: "page"`.** They cover page
+discovery, reading, status, and deletion:
 
 - `wordpress_pages_list` — discover published pages (id, title, status, date, url)
 - `wordpress_post_get` with `postType: "page"` — read a page
-- `wordpress_post_update` with `postType: "page"` — update a page
 - `wordpress_post_status` with `postType: "page"` — check a page's status
 - `wordpress_post_delete` with `postType: "page"` — delete a page
+
+**Page editing is not currently supported.** `wordpress_post_update` fails
+closed on `postType: "page"` — the governed-invoker retarget (cinatra-ai/
+cinatra#2022) found no proven, distinct page-update ability in the community
+"Enable Abilities for MCP" catalog's discovery capture, so it refuses to guess
+rather than risk writing against an unproven ability. There is no supported
+page-edit primitive today.
 
 Cinatra also registers two general-purpose primitives, `wordpress_site_tool_call`
 and `wordpress_site_tools_list`, that forward any ability the connected site's
@@ -61,7 +67,8 @@ above remain the current, fully-wired path. This section will be updated once
 that switch happens.
 
 Treat the injected adapter server as a version-dependent, read-biased extra
-surface — **not** the page-editing path. If a future adapter (or a site plugin)
+surface — **not** a page-editing path either (see above: it exposes no page
+abilities on the validated version). If a future adapter (or a site plugin)
 registers page abilities, they will appear through `discover-abilities` /
 `execute-ability`; re-run the probe to confirm before relying on them.
 

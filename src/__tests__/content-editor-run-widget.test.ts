@@ -13,8 +13,13 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 //   (c) on a widget delegation MISSING the pinned fields, THROW (no dispatch);
 //   (d) on the normal (non-widget) path, dispatch byte-identically to today
 //       (no actorOverride key).
+//
+// cinatra-ai/cinatra#2022 S7: `wordpress_content_editor_run` was extracted
+// into its own relay-only module (`mcp/relay.ts`) — this suite now calls
+// `runContentEditorRelay` directly instead of going through
+// `createWordPressPrimitiveHandlers()`, which no longer carries this key.
 
-import { createWordPressPrimitiveHandlers } from "@cinatra-ai/wordpress-mcp-connector/mcp-handlers";
+import { runContentEditorRelay } from "@cinatra-ai/wordpress-mcp-connector/mcp-relay";
 import {
   registerWordPressConnector,
   _resetWordPressDepsForTests,
@@ -62,8 +67,7 @@ const WIDGET_ACTOR: WidgetActorContext = {
 };
 
 function callRun(input: Record<string, unknown>) {
-  const handlers = createWordPressPrimitiveHandlers();
-  return (handlers as any).wordpress_content_editor_run({
+  return runContentEditorRelay({
     primitiveName: "wordpress_content_editor_run",
     input,
     actor: { actorType: "model", source: "agent" },

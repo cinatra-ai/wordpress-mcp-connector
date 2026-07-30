@@ -1,6 +1,10 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 import { createWordPressPrimitiveHandlers } from "@cinatra-ai/wordpress-mcp-connector/mcp-handlers";
+// cinatra-ai/cinatra#2022 S7: `wordpress_content_editor_run` was extracted
+// into its own relay-only module (`mcp/relay.ts`, cinatra#246) — it is no
+// longer a key on `createWordPressPrimitiveHandlers()`'s returned object.
+import { runContentEditorRelay } from "@cinatra-ai/wordpress-mcp-connector/mcp-relay";
 import {
   registerWordPressConnector,
   _resetWordPressDepsForTests,
@@ -164,13 +168,20 @@ describe("wordpress_content_editor_run", () => {
     dispatchContentEditorMock.mockResolvedValue("{}");
   });
 
-  it("is registered as a handler key on createWordPressPrimitiveHandlers()", () => {
-    expect(typeof (handlers as any).wordpress_content_editor_run).toBe("function");
+  // cinatra#246 / cinatra-ai/cinatra#2022 S7: the content-editor RELAY is a
+  // dispatch primitive, deliberately never a model-visible MCP tool — it was
+  // extracted into its own module (`mcp/relay.ts`) precisely so it can never
+  // be a key on this handlers object (previously enforced by a skip-by-name
+  // check in registry.ts's registration loop; now structural). Every other
+  // test below calls `runContentEditorRelay` directly.
+  it("is NOT a handler key on createWordPressPrimitiveHandlers() — lives in mcp/relay.ts instead", () => {
+    expect((handlers as any).wordpress_content_editor_run).toBeUndefined();
+    expect(typeof runContentEditorRelay).toBe("function");
   });
 
   it("rejects empty postId via zod schema", async () => {
     await expect(
-      (handlers as any).wordpress_content_editor_run({
+      runContentEditorRelay({
         primitiveName: "wordpress_content_editor_run",
         input: { instanceId: "site-1", postId: "", instructions: "edit" },
         actor: { actorType: "model", source: "agent" },
@@ -180,7 +191,7 @@ describe("wordpress_content_editor_run", () => {
   });
 
   it("coerces string postId to number via Zod coerce in the dispatched payload", async () => {
-    await (handlers as any).wordpress_content_editor_run({
+    await runContentEditorRelay({
       primitiveName: "wordpress_content_editor_run",
       input: { instanceId: "site-1", postId: "10", instructions: "edit" },  // string
       actor: { actorType: "model", source: "agent" },
@@ -193,7 +204,7 @@ describe("wordpress_content_editor_run", () => {
   });
 
   it("dispatches via deps.dispatchContentEditor with default :3010 agent route and timeout 300_000", async () => {
-    await (handlers as any).wordpress_content_editor_run({
+    await runContentEditorRelay({
       primitiveName: "wordpress_content_editor_run",
       input: {
         instanceId: "site-1",
@@ -222,7 +233,7 @@ describe("wordpress_content_editor_run", () => {
     registerStubDeps({
       resolveContentEditorAgentUrl: async () => "http://wayflow-wordpress-content-editor:3021",
     });
-    await (handlers as any).wordpress_content_editor_run({
+    await runContentEditorRelay({
       primitiveName: "wordpress_content_editor_run",
       input: { instanceId: "site-1", postId: 10, instructions: "edit" },
       actor: { actorType: "model", source: "agent" },
@@ -237,7 +248,7 @@ describe("wordpress_content_editor_run", () => {
     dispatchContentEditorMock.mockResolvedValue(
       '{"postId":"10","changes":[{"field":"title","before":"Old","after":"New"}]}',
     );
-    const result = await (handlers as any).wordpress_content_editor_run({
+    const result = await runContentEditorRelay({
       primitiveName: "wordpress_content_editor_run",
       input: { instanceId: "site-1", postId: 10, instructions: "x" },
       actor: { actorType: "model", source: "agent" },
@@ -251,7 +262,7 @@ describe("wordpress_content_editor_run", () => {
 
   it("strips Markdown code fences before JSON.parse", async () => {
     dispatchContentEditorMock.mockResolvedValue('```json\n{"postId":"10","changes":[]}\n```');
-    const result = await (handlers as any).wordpress_content_editor_run({
+    const result = await runContentEditorRelay({
       primitiveName: "wordpress_content_editor_run",
       input: { instanceId: "site-1", postId: 10, instructions: "x" },
       actor: { actorType: "model", source: "agent" },
@@ -262,7 +273,7 @@ describe("wordpress_content_editor_run", () => {
 
   it("falls back to { result: text } when the dispatch reply is not JSON", async () => {
     dispatchContentEditorMock.mockResolvedValue("plain text");
-    const result = await (handlers as any).wordpress_content_editor_run({
+    const result = await runContentEditorRelay({
       primitiveName: "wordpress_content_editor_run",
       input: { instanceId: "site-1", postId: 10, instructions: "x" },
       actor: { actorType: "model", source: "agent" },
@@ -273,7 +284,7 @@ describe("wordpress_content_editor_run", () => {
 
   it("falls back to { result: \"\" } when the dispatch reply is empty", async () => {
     dispatchContentEditorMock.mockResolvedValue("");
-    const result = await (handlers as any).wordpress_content_editor_run({
+    const result = await runContentEditorRelay({
       primitiveName: "wordpress_content_editor_run",
       input: { instanceId: "site-1", postId: 10, instructions: "x" },
       actor: { actorType: "model", source: "agent" },
@@ -291,18 +302,45 @@ describe("wordpress_content_editor_run", () => {
 
 describe("wordpress_post_update", () => {
   let handlers: ReturnType<typeof createWordPressPrimitiveHandlers>;
+  let invokeSiteToolMock: ReturnType<typeof vi.fn>;
+
   beforeEach(() => {
     _resetWordPressDepsForTests();
-    registerStubDeps();
+    // cinatra-ai/cinatra#2022: wordpress_post_get / wordpress_post_update route
+    // through the governed invoker's ewpa/get-post + ewpa/update-post
+    // abilities, NOT callWordPressMcp. Route by toolName: ewpa/get-post
+    // returns a full post (post_content present — the update path's
+    // independent post-apply re-read reads this); ewpa/update-post returns
+    // the community catalog's minimal echo (no content field), proving the
+    // handler does NOT trust that echo for its return value.
+    invokeSiteToolMock = vi.fn(async (input: { toolName: string; args: Record<string, unknown> }) => {
+      if (input.toolName === "ewpa/get-post" || input.toolName === "ewpa/get-page") {
+        return {
+          success: true,
+          data: {
+            ID: input.args.post_id,
+            post_status: "draft",
+            post_title: "",
+            post_content: "",
+            post_excerpt: "",
+          },
+        };
+      }
+      if (input.toolName === "ewpa/update-post") {
+        return { success: true, data: { post_id: input.args.post_id, message: "Post updated successfully." } };
+      }
+      throw new Error(`unexpected toolName in test: ${input.toolName}`);
+    });
+    registerStubDeps({ invokeSiteTool: invokeSiteToolMock });
     handlers = createWordPressPrimitiveHandlers();
-    // The reroute (cinatra#1214 S1): wordpress_post_update dispatches to the MCP
-    // client (cinatra-post-update), NOT the retired updatePost REST dep.
-    vi.mocked(callWordPressMcp).mockReset();
-    vi.mocked(callWordPressMcp).mockResolvedValue({ id: 10, status: "draft", title: "", content: "", excerpt: "" });
     // cinatra#409: the gate is invoked by every write primitive; default ALLOW.
     requireInstanceWriteAuthorityMock.mockReset();
     requireInstanceWriteAuthorityMock.mockResolvedValue(undefined);
   });
+
+  function updateCalls() {
+    return invokeSiteToolMock.mock.calls.filter((c) => c[0].toolName === "ewpa/update-post");
+  }
 
   it("is registered as a handler key on createWordPressPrimitiveHandlers()", () => {
     expect(typeof (handlers as any).wordpress_post_update).toBe("function");
@@ -332,20 +370,22 @@ describe("wordpress_post_update", () => {
     ).rejects.toThrow();
   });
 
-  it("forwards top-level title to the cinatra-post-update MCP tool (NOT inside meta)", async () => {
+  it("forwards top-level title to the governed invoker's ewpa/update-post ability (NOT inside meta)", async () => {
     await (handlers as any).wordpress_post_update({
       primitiveName: "wordpress_post_update",
       input: { instanceId: "site-1", postId: 10, title: "Hello" },
       actor: { actorType: "model", source: "agent" },
       mode: "agentic",
     });
-    expect(callWordPressMcp).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "site-1" }),
-      "cinatra-post-update",
-      { id: 10, title: "Hello" },
+    expect(invokeSiteToolMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolName: "ewpa/update-post",
+        args: { post_id: 10, title: "Hello" },
+        instanceId: "site-1",
+      }),
     );
     // Defensive: the tool args carry no meta key.
-    const args = vi.mocked(callWordPressMcp).mock.calls[0][2] as Record<string, unknown>;
+    const args = updateCalls()[0]![0].args as Record<string, unknown>;
     expect(args).not.toHaveProperty("meta");
   });
 
@@ -356,22 +396,22 @@ describe("wordpress_post_update", () => {
       actor: { actorType: "model", source: "agent" },
       mode: "agentic",
     });
-    const args = vi.mocked(callWordPressMcp).mock.calls[0][2];
-    expect(args).toEqual({ id: 10, status: "draft", title: "X", content: "Y" });
+    const args = updateCalls()[0]![0].args;
+    expect(args).toEqual({ post_id: 10, status: "draft", title: "X", content: "Y" });
   });
 
-  it("coerces string postId to number via Zod coerce (as the MCP tool's id)", async () => {
+  it("coerces string postId to number via Zod coerce (as the ability's post_id)", async () => {
     await (handlers as any).wordpress_post_update({
       primitiveName: "wordpress_post_update",
       input: { instanceId: "site-1", postId: "10", title: "X" },
       actor: { actorType: "model", source: "agent" },
       mode: "agentic",
     });
-    const args = vi.mocked(callWordPressMcp).mock.calls[0][2] as { id: number };
-    expect(args.id).toBe(10); // numeric, not string
+    const args = updateCalls()[0]![0].args as { post_id: number };
+    expect(args.post_id).toBe(10); // numeric, not string
   });
 
-  it("runs the #409 write-authority gate BEFORE the MCP write", async () => {
+  it("runs the #409 write-authority gate BEFORE the invoker write", async () => {
     await (handlers as any).wordpress_post_update({
       primitiveName: "wordpress_post_update",
       input: { instanceId: "site-1", postId: 10, title: "X" },
@@ -383,7 +423,7 @@ describe("wordpress_post_update", () => {
     );
   });
 
-  it("FAILS CLOSED on meta (the MCP ability has no meta) — throws, routes to wordpress_post_update_meta, no MCP call", async () => {
+  it("FAILS CLOSED on meta (the ability has no meta) — throws, routes to wordpress_post_update_meta, no invoker write call", async () => {
     await expect(
       (handlers as any).wordpress_post_update({
         primitiveName: "wordpress_post_update",
@@ -392,7 +432,7 @@ describe("wordpress_post_update", () => {
         mode: "agentic",
       }),
     ).rejects.toThrow(/wordpress_post_update_meta|cannot write post meta/);
-    expect(callWordPressMcp).not.toHaveBeenCalled();
+    expect(updateCalls()).toHaveLength(0);
   });
 
   it("strips an empty-string excerpt before dispatch (never wipes a field via literal '')", async () => {
@@ -404,8 +444,194 @@ describe("wordpress_post_update", () => {
       actor: { actorType: "model", source: "agent" },
       mode: "agentic",
     });
-    const args = vi.mocked(callWordPressMcp).mock.calls[0][2] as Record<string, unknown>;
-    expect(args).toEqual({ id: 10, title: "T" });
+    const args = updateCalls()[0]![0].args as Record<string, unknown>;
+    expect(args).toEqual({ post_id: 10, title: "T" });
+  });
+
+  it("does NOT trust the update ability's own response echo — independently re-reads the post via ewpa/get-post for the returned shape", async () => {
+    invokeSiteToolMock.mockImplementation(async (input: { toolName: string; args: Record<string, unknown> }) => {
+      if (input.toolName === "ewpa/update-post") {
+        // The community catalog's minimal echo — no title/content/excerpt.
+        return { success: true, data: { post_id: input.args.post_id, message: "Post updated successfully." } };
+      }
+      if (input.toolName === "ewpa/get-post") {
+        return {
+          success: true,
+          data: {
+            ID: input.args.post_id,
+            post_status: "publish",
+            post_title: "Applied title",
+            post_content: "<p>Applied body</p>",
+            post_excerpt: "Applied excerpt",
+          },
+        };
+      }
+      throw new Error(`unexpected toolName: ${input.toolName}`);
+    });
+    const res = (await (handlers as any).wordpress_post_update({
+      primitiveName: "wordpress_post_update",
+      input: { instanceId: "site-1", postId: 10, title: "New title" },
+      actor: { actorType: "model", source: "agent" },
+      mode: "agentic",
+    })) as Record<string, unknown>;
+    expect(res.title).toBe("Applied title");
+    expect(res.content).toBe("<p>Applied body</p>");
+    expect(res.excerpt).toBe("Applied excerpt");
+  });
+
+  // Codex-adopted hardening: unlike the READ side (ewpa/get-page is proven to
+  // exist for postType:"page"), no captured schema or execution proves
+  // ewpa/update-post accepts a page id, and no distinct page-update ability
+  // exists in the pinned fixture's discovery capture — so postType:"page" is
+  // refused for UPDATES, fail-closed, before the review-gate captures
+  // anything (never a silent mis-route to an unproven ability).
+  it('FAILS CLOSED on postType:"page" (page updates are unproven, unlike page reads)', async () => {
+    await expect(
+      (handlers as any).wordpress_post_update({
+        primitiveName: "wordpress_post_update",
+        input: { instanceId: "site-1", postId: 10, postType: "page", title: "New title" },
+        actor: { actorType: "model", source: "agent" },
+        mode: "agentic",
+      }),
+    ).rejects.toThrow(/postType "page" is not supported/);
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  it("FAILS CLOSED on an arbitrary/custom postType (no proven ewpa/* ability behind it)", async () => {
+    await expect(
+      (handlers as any).wordpress_post_update({
+        primitiveName: "wordpress_post_update",
+        input: { instanceId: "site-1", postId: 10, postType: "product", title: "New title" },
+        actor: { actorType: "model", source: "agent" },
+        mode: "agentic",
+      }),
+    ).rejects.toThrow(/postType "product" is not supported/);
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// wordpress_post_get — cinatra-ai/cinatra#2022 governed-invoker retarget.
+//
+// HARD REQUIREMENT coverage: the retarget must not silently lose post body
+// content (the recorded gap on the earlier `ewpa/get-posts` list re-point).
+// These tests prove (a) content flows through end-to-end from the invoker's
+// `ewpa/get-post` response to the handler's return value, (b) the handler
+// fails LOUD — never silently empty — when the response carries no
+// recognizable content field, and (c) postType:"page" dispatches to the
+// distinct `ewpa/get-page` ability, matching the abilities actually
+// discovered against the pinned S1 fixture (no unified page/post read
+// ability exists there).
+// ---------------------------------------------------------------------------
+
+describe("wordpress_post_get", () => {
+  let handlers: ReturnType<typeof createWordPressPrimitiveHandlers>;
+  let invokeSiteToolMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    _resetWordPressDepsForTests();
+    invokeSiteToolMock = vi.fn();
+    registerStubDeps({ invokeSiteTool: invokeSiteToolMock });
+    handlers = createWordPressPrimitiveHandlers();
+  });
+
+  function call(input: Record<string, unknown>) {
+    return (handlers as any).wordpress_post_get({
+      primitiveName: "wordpress_post_get",
+      input,
+      actor: { actorType: "model", source: "agent" },
+      mode: "agentic",
+    });
+  }
+
+  it("calls the governed invoker with ewpa/get-post and post_id (not id)", async () => {
+    invokeSiteToolMock.mockResolvedValue({
+      success: true,
+      data: { ID: 42, post_status: "publish", post_title: "T", post_content: "<p>Body</p>", post_excerpt: "E" },
+    });
+    await call({ instanceId: "site-1", postId: 42 });
+    expect(invokeSiteToolMock).toHaveBeenCalledWith({
+      toolName: "ewpa/get-post",
+      args: { post_id: 42 },
+      instanceId: "site-1",
+    });
+  });
+
+  it("HARD REQUIREMENT: returns the full post_content field through to the caller (content is NOT lost)", async () => {
+    invokeSiteToolMock.mockResolvedValue({
+      success: true,
+      data: {
+        ID: 42,
+        post_status: "publish",
+        post_title: "Hello world",
+        post_content: "<p>The full article body, several paragraphs long.</p>",
+        post_excerpt: "A short excerpt",
+      },
+    });
+    const res = await call({ instanceId: "site-1", postId: 42 });
+    expect(res.content).toBe("<p>The full article body, several paragraphs long.</p>");
+    expect(res.title).toBe("Hello world");
+    expect(res.excerpt).toBe("A short excerpt");
+    expect(res.status).toBe("publish");
+  });
+
+  it("also accepts a plain \"content\" key as a fallback field name", async () => {
+    invokeSiteToolMock.mockResolvedValue({
+      success: true,
+      data: { ID: 42, status: "publish", title: "T", content: "<p>Fallback-shaped body</p>", excerpt: "E" },
+    });
+    const res = await call({ instanceId: "site-1", postId: 42 });
+    expect(res.content).toBe("<p>Fallback-shaped body</p>");
+  });
+
+  it("FAILS LOUD (never silently empty) when the response carries no recognizable content field", async () => {
+    invokeSiteToolMock.mockResolvedValue({
+      success: true,
+      // Neither post_content nor content present — a field-name mismatch.
+      data: { ID: 42, post_status: "publish", post_title: "T", post_excerpt: "E" },
+    });
+    await expect(call({ instanceId: "site-1", postId: 42 })).rejects.toThrow(
+      /no recognizable content field/,
+    );
+  });
+
+  it("FAILS CLOSED when the invoker reports success:false", async () => {
+    invokeSiteToolMock.mockResolvedValue({ success: false, data: null });
+    await expect(call({ instanceId: "site-1", postId: 42 })).rejects.toThrow(/unsuccessful result/);
+  });
+
+  it("FAILS CLOSED when the governed invoker is unbound", async () => {
+    _resetWordPressDepsForTests();
+    registerStubDeps({ invokeSiteTool: undefined });
+    handlers = createWordPressPrimitiveHandlers();
+    await expect(call({ instanceId: "site-1", postId: 42 })).rejects.toThrow(
+      /governed connector-instance invoker is unavailable/,
+    );
+  });
+
+  it('dispatches to ewpa/get-page (not ewpa/get-post) when postType is "page"', async () => {
+    invokeSiteToolMock.mockResolvedValue({
+      success: true,
+      data: { ID: 7, post_status: "publish", post_title: "A Page", post_content: "<p>Page body</p>", post_excerpt: "" },
+    });
+    await call({ instanceId: "site-1", postId: 7, postType: "page" });
+    expect(invokeSiteToolMock).toHaveBeenCalledWith({
+      toolName: "ewpa/get-page",
+      args: { post_id: 7 },
+      instanceId: "site-1",
+    });
+  });
+
+  // Codex-adopted hardening: an arbitrary/custom postType (a CPT slug) has no
+  // proven ewpa/* ability behind it in this retarget (the pinned fixture's
+  // discovery capture registers SEPARATE ewpa/get-cpt-item(s) abilities for
+  // custom post types, not wired up here) — refuse rather than silently
+  // mis-route it to the post- or page-shaped ability.
+  it("FAILS CLOSED on an arbitrary/custom postType (no proven ewpa/* ability behind it)", async () => {
+    await expect(call({ instanceId: "site-1", postId: 7, postType: "product" })).rejects.toThrow(
+      /postType "product" is not supported/,
+    );
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
   });
 });
 

@@ -6,8 +6,12 @@ import { registerWordPressPrimitives } from "../mcp/registry";
 // must NOT be registered as a self-MCP tool: when the wordpress-content-editor
 // agent has the cinatra MCP server injected, a visible dispatcher tool let the
 // model call it and re-dispatch itself (observed recursive mcp_call -> 504).
-// The host relays to the agent directly via dispatchContentEditorViaA2A; the
-// relay handler still exists in the map but must never reach tools/list.
+// The host relays to the agent directly via dispatchContentEditorViaA2A.
+// cinatra-ai/cinatra#2022 S7: the relay was extracted into its own module
+// (`../mcp/relay.ts`, `runContentEditorRelay`) and is no longer part of the
+// handlers map `registerWordPressPrimitives` iterates over at all — this
+// assertion now holds structurally, not just by an explicit skip-by-name
+// check in the registration loop.
 describe("registerWordPressPrimitives — relay is NOT a model-visible MCP tool (cinatra#246)", () => {
   it("registers the real read/write primitives but OMITS wordpress_content_editor_run", () => {
     const registered: string[] = [];

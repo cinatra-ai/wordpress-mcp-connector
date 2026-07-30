@@ -25,16 +25,15 @@ import {
   type WordPressMcpInstance,
 } from "../deps";
 
-// wordpress_post_update / wordpress_post_get reroute to the MCP client
-// (cinatra#1214 S1); mock it so this suite asserts the gate-before-write
-// ordering against the MCP writer, not a live transport.
+// wordpress_post_create_draft / wordpress_post_update_meta / wordpress_post_delete
+// / wordpress_media_upload reroute to the MCP client (cinatra#1214 S1 / wordpress-
+// plugin#82); mock it so this suite asserts the gate-before-write ordering
+// against the MCP writer, not a live transport. wordpress_post_get /
+// wordpress_post_update do NOT use this client any more — they reach WordPress
+// through the governed connector-instance invoker instead (cinatra-ai/
+// cinatra#2022); see invokeSiteToolMock below.
 vi.mock("../lib/wordpress-mcp-client", () => ({
   callWordPressMcp: vi.fn(),
-  CINATRA_POST_GET_TOOL: "cinatra-post-get",
-  CINATRA_POST_UPDATE_TOOL: "cinatra-post-update",
-  // wordpress-plugin#82 — every WordPress content write now dispatches through
-  // the MCP client (the plugin's content tools), so ALL write primitives'
-  // "writer" is callWordPressMcp.
   CINATRA_POST_STATUS_TOOL: "cinatra-post-status",
   CINATRA_POSTS_LIST_TOOL: "cinatra-posts-list",
   CINATRA_POST_DELETE_TOOL: "cinatra-post-delete",
@@ -54,11 +53,42 @@ const requireInstanceWriteAuthorityMock = vi.fn(
 // The five host writers behind the gated primitives. We assert these fire ONLY
 // after an allow, and NEVER after a deny / unbound gate.
 const createDraftMock = vi.fn(async () => ({ wordpressPostId: 10, adminUrl: "a" }));
-// wordpress_post_update's "writer" is now the MCP client (callWordPressMcp),
-// mocked above — see WRITER_FOR / allWriterMocks below.
+// wordpress_post_update's "writer" is now the governed invoker's ewpa/update-post
+// ability — invokeUpdatePostSpy below records exactly those calls (invokeSiteTool
+// is also used for the read path, which must NOT count as a "write").
 const updateDraftMetaMock = vi.fn(async () => ({ id: 10 }));
 const deletePostMock = vi.fn(async () => ({ deleted: true }));
 const uploadMediaMock = vi.fn(async () => ({ mediaId: 7 }));
+
+// The governed invoker mock (cinatra-ai/cinatra#2022): routes by ability name.
+// `ewpa/get-post` / `ewpa/get-page` back wordpress_post_get and updatePostViaMcp's
+// own post-write re-read; `ewpa/update-post` backs the actual write.
+// `invokeUpdatePostSpy` records ONLY the write calls so WRITER_FOR's
+// `toHaveBeenCalledTimes(1)` assertion isn't inflated by the read call
+// updatePostViaMcp also makes.
+const invokeUpdatePostSpy = vi.fn();
+const invokeSiteToolMock = vi.fn(
+  async (input: { toolName: string; args: Record<string, unknown> }) => {
+    if (input.toolName === "ewpa/get-post" || input.toolName === "ewpa/get-page") {
+      return {
+        success: true,
+        data: {
+          ID: 10,
+          post_status: "draft",
+          post_title: "T",
+          post_content: "C",
+          post_excerpt: "E",
+          permalink: "https://example.com/p",
+        },
+      };
+    }
+    if (input.toolName === "ewpa/update-post") {
+      invokeUpdatePostSpy(input);
+      return { success: true, data: { post_id: input.args.post_id, message: "Post updated successfully." } };
+    }
+    throw new Error(`unexpected toolName in write-authority test: ${input.toolName}`);
+  },
+);
 
 const listMcpInstancesMock = vi.fn((): WordPressMcpInstance[] => []);
 
@@ -102,6 +132,7 @@ function registerDepsStub(over?: {
     uploadMedia: uploadMediaMock,
     updateDraftMeta: updateDraftMetaMock,
     requireInstanceWriteAuthority: requireInstanceWriteAuthorityMock,
+    invokeSiteTool: invokeSiteToolMock,
   };
   if (over?.omitGate) {
     // Model an OLD host that never bound the gate (dep absent).
@@ -113,20 +144,33 @@ function registerDepsStub(over?: {
 }
 
 // The "writer" a given primitive ultimately dispatches to. wordpress-plugin#82:
-// EVERY WordPress content write now goes through the MCP client
-// (callWordPressMcp → the plugin's content tools), never a direct-REST dep.
+// four of the five still go through the MCP client (callWordPressMcp → the
+// plugin's content tools); wordpress_post_update's writer is now the governed
+// invoker's ewpa/update-post ability (cinatra-ai/cinatra#2022) — tracked via
+// invokeUpdatePostSpy so the read call updatePostViaMcp also makes doesn't
+// inflate the "called once" assertion.
 const WRITER_FOR: Record<string, () => ReturnType<typeof vi.fn>> = {
   wordpress_post_create_draft: () => vi.mocked(callWordPressMcp),
-  wordpress_post_update: () => vi.mocked(callWordPressMcp),
+  wordpress_post_update: () => invokeUpdatePostSpy,
   wordpress_post_update_meta: () => vi.mocked(callWordPressMcp),
   wordpress_post_delete: () => vi.mocked(callWordPressMcp),
   wordpress_media_upload: () => vi.mocked(callWordPressMcp),
 };
 
-// The MCP writer PLUS the retired direct-REST deps — after a DENY, NONE of these
-// may fire (belt-and-braces: the old REST deps must never be reached either).
+// The MCP writer PLUS the governed-invoker writer PLUS the retired direct-REST
+// deps — after a DENY, NONE of these may fire (belt-and-braces: the old REST
+// deps must never be reached either). `invokeSiteToolMock` (not just the
+// update-only spy) is included since a denied wordpress_post_update must never
+// reach the invoker at ALL — not even for its post-write re-read.
 function allWriterMocks() {
-  return [vi.mocked(callWordPressMcp), createDraftMock, updateDraftMetaMock, deletePostMock, uploadMediaMock];
+  return [
+    vi.mocked(callWordPressMcp),
+    invokeSiteToolMock,
+    createDraftMock,
+    updateDraftMetaMock,
+    deletePostMock,
+    uploadMediaMock,
+  ];
 }
 
 describe("cinatra#409 — per-user write authorization in the WordPress MCP write handlers", () => {
@@ -160,6 +204,7 @@ describe("cinatra#409 — per-user write authorization in the WordPress MCP writ
       total: 0,
       link: "https://example.com/p",
     });
+    invokeUpdatePostSpy.mockClear();
     registerDepsStub();
   });
 
@@ -255,10 +300,11 @@ describe("cinatra#409 — per-user write authorization in the WordPress MCP writ
       order.push("authz");
       throw new Error("write denied: ordering");
     });
-    vi.mocked(callWordPressMcp).mockImplementationOnce(async () => {
-      order.push("write");
-      return { id: 5, status: "draft", title: "", content: "", excerpt: "" };
-    });
+    // No invokeSiteToolMock override needed here (and deliberately none queued
+    // via mockImplementationOnce, which would otherwise leak into a LATER
+    // test's call if never consumed here) — the assertion below already
+    // proves the write never happens; invokeSiteToolMock not being called at
+    // all is the positive proof.
     await expect(
       (handlers as any).wordpress_post_update({
         primitiveName: "wordpress_post_update",
@@ -268,6 +314,7 @@ describe("cinatra#409 — per-user write authorization in the WordPress MCP writ
       }),
     ).rejects.toThrow(/denied/i);
     expect(order).toEqual(["authz"]); // authz ran; write never did.
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
   });
 
   // ---- Fail-closed when the host dep is UNBOUND (old host) ----
@@ -283,6 +330,7 @@ describe("cinatra#409 — per-user write authorization in the WordPress MCP writ
       }),
     ).rejects.toThrow(/write-authority gate is unavailable|unbound|denied/i);
     expect(callWordPressMcp).not.toHaveBeenCalled();
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
   });
 
   it("FAILS CLOSED when the bound gate is not a function (skewed/partial host binding)", async () => {
