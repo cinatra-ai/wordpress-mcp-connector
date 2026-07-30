@@ -1254,12 +1254,13 @@ export function createWordPressClient(ctx: ExtensionHostContext): WordPressClien
   // (`updateWordPressPost` → `POST /wp/v2/(posts|pages)/{id}` and
   // `readWordPressPost` → `GET /wp/v2/(posts|pages)/{id}?context=edit`) were
   // DELETED. The in-admin `wordpress_post_get` / `wordpress_post_update`
-  // primitives now reach WordPress content ONLY through the site's MCP
-  // integration (`callWordPressMcp` → the plugin's `cinatra-post-get` /
-  // `cinatra-post-update` tools), so no direct `/wp/v2/*` egress with a stored
-  // credential remains on the in-admin path. The remaining carve-out members
-  // (uploadMedia / deletePost / readPostStatus) keep their direct-REST path
-  // per the design §C carve-out; `createDraft` / `updateDraftMeta` /
+  // tool names that replaced them were themselves later deleted
+  // (cinatra-ai/cinatra#2022 PR-θ) after their transport was retargeted onto
+  // the governed connector-instance invoker (`ewpa/get-post` /
+  // `ewpa/update-post`, PR-τ) — no direct `/wp/v2/*` egress with a stored
+  // credential ever came back on the in-admin path. The remaining carve-out
+  // members (uploadMedia / deletePost / readPostStatus) keep their direct-REST
+  // path per the design §C carve-out; `createDraft` / `updateDraftMeta` /
   // `listPublished*` were retired alongside them (cinatra#2022 S7 — those
   // three legs re-pointed onto the governed invoker from cinatra core's
   // blog-publish path, PR-β, leaving no caller for the direct-REST versions;

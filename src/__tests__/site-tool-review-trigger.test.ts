@@ -1,15 +1,23 @@
 // cinatra-ai/cinatra#2022 — the relocated ability-name-keyed content-review
 // trigger.
 //
-// `wordpress_post_update`'s handler (see cms-review-handler.test.ts) was,
-// until this change, the ONLY place in this connector that called
-// `evaluateStagedContentWrite` — the review-before-publish TRIGGER that holds
-// a staged content write fail-closed until a human approves it. The GENERIC
-// forwarding primitive, `wordpress_site_tool_call`, was a bare pass-through
-// with no review-triggering logic: a caller reaching `ewpa/update-post`
-// directly through it bypassed the gate entirely. This suite pins:
-//   - the relocated trigger fires identically to the dedicated tool's own
-//     gate (before/after behavioral parity);
+// `wordpress_post_update`'s handler was, until wmc#100, the ONLY place in
+// this connector that called `evaluateStagedContentWrite` — the
+// review-before-publish TRIGGER that holds a staged content write
+// fail-closed until a human approves it. The GENERIC forwarding primitive,
+// `wordpress_site_tool_call`, was a bare pass-through with no
+// review-triggering logic: a caller reaching `ewpa/update-post` directly
+// through it bypassed the gate entirely. wmc#100 relocated the trigger onto
+// `wordpress_site_tool_call` itself, keyed on ability name, BEFORE PR-θ
+// deleted `wordpress_post_update` (and its own now-redundant inline gate)
+// along with the other 11 dead facade tools — so this suite now covers the
+// trigger's ONLY remaining home. (The dedicated tool's own gate test file,
+// `cms-review-handler.test.ts`, and the before/after parity suite that once
+// compared the two paths side by side, are deleted with the tool — see
+// registry-omission.test.ts for the deletion's own regression coverage.)
+// This suite pins:
+//   - the relocated trigger's hold/approve/reject/pass behavior on the
+//     generic path;
 //   - a call with no agent-run context still holds fail-closed;
 //   - the mutating ability is NEVER invoked while held/rejected
 //     (hold-before-forward);
@@ -404,106 +412,19 @@ describe("wordpress_site_tool_call — relocated content-review trigger (cinatra
 });
 
 // ---------------------------------------------------------------------------
-// Before/after behavioral parity: the SAME staged write through the OLD
-// dedicated tool path (`wordpress_post_update`, still present on main — this
-// change does not delete it) and the NEW generic path
-// (`wordpress_site_tool_call` with toolName:"ewpa/update-post") produces the
-// SAME hold/approve/reject outcome for equivalent inputs.
+// REMOVED (cinatra-ai/cinatra#2022 PR-θ): a "behavioral parity —
+// wordpress_post_update vs. wordpress_site_tool_call(ewpa/update-post)"
+// suite used to live here, driving the SAME staged write through both the
+// OLD dedicated tool path and the NEW generic path to prove identical
+// hold/approve/reject outcomes. PR-θ deletes `wordpress_post_update` (and
+// the ten other superseded facade tools) now that this relocation has
+// soaked — `createWordPressPrimitiveHandlers()` no longer has a
+// `wordpress_post_update` key, so a parity comparison against it can no
+// longer be driven. The equivalence this suite proved is not lost: it was
+// exercised for real, on both paths, while both existed (wmc#100), and the
+// design's own equivalence mapping (`.claude/scratch/s7-2022/DESIGN.md`
+// §15.4) records the property-by-property comparison. The hold/approve/
+// reject/pass coverage on the surviving generic path lives in the describe
+// block above; a non-target-ability regression test and a no-run-context
+// (orphan-run) test are also covered there.
 // ---------------------------------------------------------------------------
-describe("behavioral parity — wordpress_post_update vs. wordpress_site_tool_call(ewpa/update-post)", () => {
-  function freshDeps(extra: Partial<WordPressConnectorDeps> = {}) {
-    invokeSiteToolMock = vi.fn();
-    _resetWordPressDepsForTests();
-    registerStubDeps(extra);
-    routeMcpByTool();
-  }
-
-  it("HOLD: both paths capture the identical scope manifest and hold — WordPress unchanged either way", async () => {
-    const seamOld = makeSeam();
-    freshDeps({ cmsReview: seamOld });
-    const oldHandlers = createWordPressPrimitiveHandlers();
-    const oldRes = (await (oldHandlers as any).wordpress_post_update({
-      primitiveName: "wordpress_post_update",
-      input: { instanceId: "site-1", postId: 42, title: "New title", content: "<p>New body</p>" },
-    })) as Record<string, unknown>;
-    const oldScope = vi.mocked(seamOld.captureStagedWrite).mock.calls[0]![0].scopeManifest.paths;
-
-    const seamNew = makeSeam();
-    freshDeps({ cmsReview: seamNew });
-    const newHandlers = createWordPressPrimitiveHandlers();
-    const newRes = (await (newHandlers as any).wordpress_site_tool_call({
-      primitiveName: "wordpress_site_tool_call",
-      input: {
-        toolName: "ewpa/update-post",
-        args: { post_id: 42, title: "New title", content: "<p>New body</p>" },
-        instanceId: "site-1",
-      },
-      actor: MODEL_ACTOR,
-      mode: "agentic",
-    })) as Record<string, unknown>;
-    const newScope = vi.mocked(seamNew.captureStagedWrite).mock.calls[0]![0].scopeManifest.paths;
-
-    expect((oldRes as any).status).toBe("pending_review");
-    expect((newRes as any).status).toBe("pending_review");
-    expect((oldRes as any).applied).toBe(false);
-    expect((newRes as any).applied).toBe(false);
-    expect(newScope).toEqual(oldScope);
-  });
-
-  it("APPROVE: both paths apply the write and record a verified read-back", async () => {
-    const approvedDisposition = async () => ({ disposition: "approved" as const, gate: { gateId: "gate-1", runId: "run-1" } });
-
-    const seamOld = makeSeam({ resolveDisposition: vi.fn(approvedDisposition) });
-    freshDeps({ cmsReview: seamOld });
-    const oldHandlers = createWordPressPrimitiveHandlers();
-    const oldRes = (await (oldHandlers as any).wordpress_post_update({
-      primitiveName: "wordpress_post_update",
-      input: { instanceId: "site-1", postId: 42, title: "New title" },
-    })) as Record<string, unknown>;
-
-    const seamNew = makeSeam({ resolveDisposition: vi.fn(approvedDisposition) });
-    freshDeps({ cmsReview: seamNew });
-    const newHandlers = createWordPressPrimitiveHandlers();
-    const newRes = (await (newHandlers as any).wordpress_site_tool_call({
-      primitiveName: "wordpress_site_tool_call",
-      input: { toolName: "ewpa/update-post", args: { post_id: 42, title: "New title" }, instanceId: "site-1" },
-      actor: MODEL_ACTOR,
-      mode: "agentic",
-    })) as Record<string, unknown>;
-
-    expect(((oldRes as any).review).outcome).toBe("verified");
-    expect(((newRes as any).review).outcome).toBe("verified");
-    expect(seamOld.recordApplyVerification).toHaveBeenCalledTimes(1);
-    expect(seamNew.recordApplyVerification).toHaveBeenCalledTimes(1);
-  });
-
-  it("REJECT: both paths refuse — WordPress never receives the write", async () => {
-    const rejectedDisposition = async () => ({ disposition: "rejected" as const, gate: { gateId: "gate-1", runId: "run-1" } });
-
-    const seamOld = makeSeam({ resolveDisposition: vi.fn(rejectedDisposition) });
-    freshDeps({ cmsReview: seamOld });
-    const oldHandlers = createWordPressPrimitiveHandlers();
-    await expect(
-      (oldHandlers as any).wordpress_post_update({
-        primitiveName: "wordpress_post_update",
-        input: { instanceId: "site-1", postId: 42, title: "New title" },
-      }),
-    ).rejects.toThrow(/rejected/i);
-    const oldUpdateCalls = invokeSiteToolMock.mock.calls.filter((c) => c[0].toolName === "ewpa/update-post");
-    expect(oldUpdateCalls).toHaveLength(0);
-
-    const seamNew = makeSeam({ resolveDisposition: vi.fn(rejectedDisposition) });
-    freshDeps({ cmsReview: seamNew });
-    const newHandlers = createWordPressPrimitiveHandlers();
-    await expect(
-      (newHandlers as any).wordpress_site_tool_call({
-        primitiveName: "wordpress_site_tool_call",
-        input: { toolName: "ewpa/update-post", args: { post_id: 42, title: "New title" }, instanceId: "site-1" },
-        actor: MODEL_ACTOR,
-        mode: "agentic",
-      }),
-    ).rejects.toThrow(/rejected/i);
-    const newUpdateCalls = invokeSiteToolMock.mock.calls.filter((c) => c[0].toolName === "ewpa/update-post");
-    expect(newUpdateCalls).toHaveLength(0);
-  });
-});

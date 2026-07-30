@@ -2,10 +2,17 @@
 
 Cinatra can inject a public WordPress site's **external MCP adapter**
 (`WordPress/mcp-adapter`, which depends on `WordPress/abilities-api`) as an
-external MCP server, so an LLM provider can talk to the site directly. Because
-the adapter's tool set is version-dependent, the connector injects it with
-`allowedTools: null` and `requireApproval: "read-only"` rather than a static,
-possibly-wrong tool allowlist.
+external MCP server, so an LLM provider can talk to the site directly — but
+only under the **trusted-site mode** contract (cinatra-ai/cinatra#2019 S4):
+the assembling surface must be workspace chat, the instance needs a current
+per-instance opt-in with its consent acknowledgement unchanged since, the
+catalog must verify, and the host's descriptor-verified read set for that
+instance must be non-empty. Because the adapter's tool set is
+version-dependent, every injected entry carries EXACTLY that host-granted
+read-tool allowlist — the old full-catalog `allowedTools: null` form is
+unrepresentable — with `approval: "auto_execute"` rather than a per-call
+`requireApproval: "read-only"` prompt. Writes are never injected this way;
+they always stay on the governed connector-instance invoker.
 
 This note records what that adapter actually exposes for **pages**, and the
 supported path for callers working from outside Cinatra.
@@ -43,28 +50,31 @@ ability**, so:
 
 ## Which path to use for pages
 
-**Use the Cinatra-owned primitives with `postType: "page"`.** They cover page
-discovery, reading, status, and deletion:
+**Use the two general-purpose primitives, `wordpress_site_tool_call` and
+`wordpress_site_tools_list`.** cinatra-ai/cinatra#2022 (S7, PR-θ) deleted the
+12 named Cinatra facade tools that used to cover this (`wordpress_pages_list`,
+`wordpress_post_get`, `wordpress_post_status`, `wordpress_post_delete`,
+`wordpress_post_update`, and the rest) — there is no dedicated per-operation
+page tool anymore. Both primitives forward, through the same governed
+connector-instance invoker (the same per-instance authorization + policy path
+the deleted named tools used internally), directly to whatever ability the
+connected site's own MCP catalog exposes — call `wordpress_site_tools_list`
+first to discover the exact ability ids a given site advertises, then
+`wordpress_site_tool_call` with that `toolName` and matching `args`.
 
-- `wordpress_pages_list` — discover published pages (id, title, status, date, url)
-- `wordpress_post_get` with `postType: "page"` — read a page
-- `wordpress_post_status` with `postType: "page"` — check a page's status
-- `wordpress_post_delete` with `postType: "page"` — delete a page
-
-**Page editing is not currently supported.** `wordpress_post_update` fails
-closed on `postType: "page"` — the governed-invoker retarget (cinatra-ai/
-cinatra#2022) found no proven, distinct page-update ability in the community
-"Enable Abilities for MCP" catalog's discovery capture, so it refuses to guess
-rather than risk writing against an unproven ability. There is no supported
-page-edit primitive today.
-
-Cinatra also registers two general-purpose primitives, `wordpress_site_tool_call`
-and `wordpress_site_tools_list`, that forward any ability the connected site's
-own MCP catalog exposes through the same governed, policy-checked path as the
-primitives above. They exist in the tool registry today, but no calling
-surface has been switched over to them for pages yet — the named primitives
-above remain the current, fully-wired path. This section will be updated once
-that switch happens.
+For a site running the community "Enable Abilities for MCP" catalog, page
+discovery/read routes through that catalog's own ability ids (e.g.
+`ewpa/get-posts` filtered/paginated for listing, `ewpa/get-page` for reading a
+single page by id — a distinct ability from `ewpa/get-post`, per the
+catalog's own discovery capture). **Page editing still has no known supported
+ability**: no distinct page-update ability was ever proven to exist in that
+catalog's discovery capture (only `ewpa/update-post`, which is post-shaped) —
+that was true of the old, now-deleted `wordpress_post_update` tool (which
+failed closed on `postType: "page"` for exactly this reason) and remains true
+of the generic path, since the underlying site catalog hasn't changed. Call
+`wordpress_site_tools_list` to check what a given site's catalog actually
+advertises before assuming otherwise — a future adapter/plugin version could
+add one.
 
 Treat the injected adapter server as a version-dependent, read-biased extra
 surface — **not** a page-editing path either (see above: it exposes no page
@@ -87,6 +97,14 @@ For Cinatra to inject a site's adapter at all, every one of these must hold:
 4. **Cinatra instance authorization** — the acting user must hold `use`
    authority on that connector instance; the host resolves the trusted actor
    from the MCP request frame and fails closed otherwise.
+5. **Trusted-site mode granted** — the assembling chat surface must be
+   workspace chat (agent-run/public-widget/session surfaces never inject),
+   the instance needs a current per-instance opt-in with its consent
+   acknowledgement unchanged since, the catalog must verify, and the host's
+   descriptor-verified read-tool set for that instance must be non-empty
+   (cinatra-ai/cinatra#2019 S4). On today's community-plugin stack that
+   verified set is empty by capture, so even an otherwise-eligible,
+   fully-opted-in site injects nothing yet.
 
 ## Troubleshooting
 
@@ -95,8 +113,9 @@ For Cinatra to inject a site's adapter at all, every one of these must hold:
 - **Instance shows `auth_error`** — the Application Password is missing, revoked,
   or wrong. Regenerate it and re-save the instance.
 - **Adapter injected but no page tools appear** — expected. See above: the
-  adapter exposes no page tools on the supported version. Use the Cinatra
-  primitives with `postType: "page"`.
+  adapter exposes no page tools on the supported version. Use
+  `wordpress_site_tool_call` / `wordpress_site_tools_list` against the site's
+  own MCP catalog instead.
 - **`Missing Mcp-Session-Id header`** — the caller skipped the `initialize`
   handshake or dropped the session header. Capture the `Mcp-Session-Id` from the
   `initialize` response and send it on every subsequent request.
