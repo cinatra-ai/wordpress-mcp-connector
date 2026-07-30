@@ -1,4 +1,4 @@
-import { createWordPressPrimitiveHandlers } from "./mcp/handlers";
+import { runContentEditorRelay } from "./mcp/relay";
 
 // Local structural mirror of `@cinatra-ai/llm`'s `LlmToolParameterSchema` /
 // `LlmFunctionTool` (the chat tool-call contract) so the connector depends only
@@ -40,7 +40,6 @@ export type WordPressWidgetContext = {
  */
 export function createWordPressWidgetChatTool(opts: { context: WordPressWidgetContext }): WordPressLlmFunctionTool {
   const { context } = opts;
-  const handlers = createWordPressPrimitiveHandlers();
 
   return {
     name: "wordpress_content_editor_run",
@@ -67,7 +66,7 @@ export function createWordPressWidgetChatTool(opts: { context: WordPressWidgetCo
       // [IN-01 fix] Pass `undefined` (not "") for absent optional fields so
       // zod's `.default("post")` etc. fire — `.default()` only triggers on
       // `undefined`, not on empty strings.
-      return handlers.wordpress_content_editor_run({
+      return runContentEditorRelay({
         primitiveName: "wordpress_content_editor_run",
         input: {
           instructions: typeof args.instructions === "string" ? args.instructions : "",

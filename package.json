@@ -17,6 +17,7 @@
     "./setup-page": "./src/setup-page.tsx",
     "./setup-actions": "./src/setup-actions.ts",
     "./mcp-handlers": "./src/mcp/handlers.ts",
+    "./mcp-relay": "./src/mcp/relay.ts",
     "./mcp-toolbox": "./src/mcp/toolbox.ts",
     "./mcp-module": "./src/mcp/module.ts",
     "./widget-chat-tool": "./src/widget-chat-tool.ts",
