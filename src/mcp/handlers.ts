@@ -18,6 +18,7 @@ import type { ExtensionPrimitiveRequest } from "@cinatra-ai/sdk-extensions";
 import {
   getWordPressDeps,
   listInstancesSorted,
+  type WordPressConnectorDeps,
   type WordPressMcpInstance,
   type WordPressMcpPublicInstance,
 } from "../deps";
@@ -440,6 +441,190 @@ async function updatePostViaMcp(input: {
   await callEwpaAbility(input.instance, EWPA_UPDATE_POST_ABILITY, args);
 
   return readPostViaMcp(input.instance, input.postId, input.postType);
+}
+
+// ---------------------------------------------------------------------------
+// Ability-name-keyed content-review trigger for the GENERIC invoker path
+// (cinatra-ai/cinatra#2022).
+//
+// `wordpress_post_update`'s handler (below `createWordPressPrimitiveHandlers`)
+// is, until this change, the ONLY place in this connector that calls
+// `evaluateStagedContentWrite` — the review-before-publish TRIGGER that holds
+// a staged content write fail-closed until a human approves it. The GENERIC
+// forwarding primitive, `wordpress_site_tool_call`, was a bare pass-through
+// with NO review-triggering logic of any kind: a caller reaching the SAME
+// mutating ability (`ewpa/update-post`) directly through the generic path
+// bypassed the gate entirely.
+//
+// An earlier plan considered registering this trigger against a NEW hook
+// slot in cinatra core's governed invoker (`connector-instance-invoker.ts`'s
+// `contentReviewHook`) — that slot shipped (cinatra#2215) but is bound
+// HOST-SIDE, once, for the WHOLE invoker; there is no connector-facing
+// registration mechanism to attach WordPress's business logic to without
+// cinatra core importing this connector's own composition — exactly the
+// per-ability hardcoding this epic exists to remove. The fix here instead:
+// relocate the SAME trigger call into THIS handler, keyed on ability name —
+// no invoker hook, no new cinatra-core plumbing, no new capability.
+// `cmsReview` and `invokeSiteTool` are already members of the SAME `deps`
+// object this file already reads.
+//
+// SCOPE — only `ewpa/update-post` is keyed here, the exact ability
+// `wordpress_post_update`'s own gate already protects (its governed-invoker
+// retarget target, above) — a 1:1 relocation of an existing guarantee, not a
+// widening. `ewpa/create-post` (or any future WordPress write ability) is a
+// real, DISCLOSED completeness question left OPEN by this change, not
+// silently decided: `evaluateStagedContentWrite`'s mechanics (fetch an
+// EXISTING resource, diff the proposal against it) do not extend to a CREATE
+// with no prior state, and widening the keyed set is a separate design
+// decision this change does not make — flagged as a review focus, not
+// assumed closed.
+// ---------------------------------------------------------------------------
+
+export const CONTENT_REVIEW_TARGET_ABILITIES: ReadonlySet<string> = new Set([EWPA_UPDATE_POST_ABILITY]);
+
+/**
+ * The relocated review-before-publish trigger for the generic invoker path —
+ * the SAME `evaluateStagedContentWrite` call `wordpress_post_update` makes,
+ * reusing the SAME `readPostViaMcp` helper for the current-content fetch and
+ * the post-apply read-back, now keyed generically off the ability name
+ * reaching `wordpress_site_tool_call` directly (rather than off a dedicated
+ * tool's own schema-parsed fields).
+ *
+ * ORDER: runs BEFORE the mutating ability is forwarded. On `hold`/`reject`
+ * the mutating `invoke()` call for `ewpa/update-post` is NEVER made — the
+ * write does not reach WordPress. On `pass`/`apply` the SAME raw `input.args`
+ * are forwarded UNMODIFIED (§3.7) to `invoke()`, exactly as the generic
+ * primitive already does for every other ability; only on `apply` is the
+ * post-apply read-back additionally recorded.
+ *
+ * FAIL-CLOSED ON instanceId: `wordpress_post_update`'s own dedicated schema
+ * requires `instanceId` unconditionally (fence on or off) — this branch
+ * mirrors that SAME unconditional requirement for parity, even though the
+ * generic schema otherwise allows an absent instanceId for a session pinned
+ * to a single site. This connector has no way to resolve WHICH instance that
+ * is; refusing, rather than guessing or silently skipping review, keeps the
+ * no-silent-publish guarantee intact for this ability.
+ */
+async function callReviewGatedSiteTool(
+  invoke: NonNullable<WordPressConnectorDeps["invokeSiteTool"]>,
+  input: { toolName: string; args: Record<string, unknown>; instanceId?: string; serverId?: string },
+): Promise<unknown> {
+  const instanceId = input.instanceId;
+  if (!instanceId) {
+    throw new Error(
+      `wordpress_site_tool_call: "${input.toolName}" is a content-review-gated write and requires an ` +
+        "explicit instanceId — refusing without one rather than staging an unattributable review.",
+    );
+  }
+  const instance = listInstancesSorted().find((i) => i.id === instanceId);
+  if (!instance) throw new Error("WordPress instance not found.");
+
+  const args = input.args;
+  const rawPostId = args.post_id;
+  const postId = typeof rawPostId === "number" ? rawPostId : Number(rawPostId);
+  if (!Number.isFinite(postId) || postId <= 0) {
+    throw new Error(`wordpress_site_tool_call: "${input.toolName}" requires a positive numeric "post_id" argument.`);
+  }
+
+  // Mirror wordpress_post_update's own pre-gate hardening exactly (the same
+  // checks already applied to the dedicated tool below): meta is not covered
+  // by this ability, and a request with no editable field would strand an
+  // APPROVED-but-inapplicable review at apply time. Fail BEFORE any capture,
+  // not after.
+  if (args.meta !== undefined) {
+    throw new Error(
+      `wordpress_site_tool_call: "${input.toolName}" cannot write post meta through the governed connector-instance ` +
+        "invoker — use wordpress_post_update_meta for meta writes.",
+    );
+  }
+  const title = typeof args.title === "string" ? args.title : undefined;
+  const content = typeof args.content === "string" ? args.content : undefined;
+  const excerpt = typeof args.excerpt === "string" ? args.excerpt : undefined;
+  const status = typeof args.status === "string" ? args.status : undefined;
+  const hasEditableField =
+    typeof title === "string" ||
+    (typeof content === "string" && content.length > 0) ||
+    (typeof excerpt === "string" && excerpt.length > 0) ||
+    typeof status === "string";
+  if (!hasEditableField) {
+    throw new Error(`wordpress_site_tool_call: "${input.toolName}" has no editable fields (title/content/excerpt/status).`);
+  }
+
+  // No page-specific update ability exists (see readPostViaMcp/updatePostViaMcp's
+  // own section comment above) — `ewpa/update-post`'s own wire shape carries no
+  // postType at all (it keys purely off post_id), so the current-content fetch
+  // and post-apply read-back below always target the post-shaped read ability.
+  const review = await evaluateStagedContentWrite({
+    seam: getWordPressDeps().cmsReview,
+    connectorId: WORDPRESS_CONNECTOR_ID,
+    instanceId,
+    postId,
+    postType: undefined,
+    proposed: { title, content, excerpt, status },
+    fetchCurrent: async (): Promise<CmsCurrentContent> => {
+      const cur = await readPostViaMcp(instance, postId, undefined);
+      return {
+        title: cur.title,
+        content: cur.content,
+        excerpt: cur.excerpt,
+        status: cur.status,
+        adminUrl: cur.adminUrl,
+        ...(cur.link !== undefined ? { link: cur.link } : {}),
+      };
+    },
+  });
+
+  // HELD: the effect is held pending review — the mutating invoke() call is
+  // NEVER made. The write does not reach WordPress.
+  if (review.action === "hold") return review.pending;
+  // REJECTED: a tombstoned effect never writes.
+  if (review.action === "reject") {
+    throw new Error(`wordpress_site_tool_call: ${review.reason}`);
+  }
+
+  // PASS (fence off / org-ungated / nothing to review) or APPLY (an approved
+  // gate released the effect). Either way the write proceeds, forwarding the
+  // RAW args UNMODIFIED (§3.7) to the SAME governed invoker — identical to
+  // how wordpress_site_tool_call forwards every other ability.
+  const applied = await invoke({
+    toolName: input.toolName,
+    args: input.args,
+    instanceId,
+    ...(input.serverId !== undefined ? { serverId: input.serverId } : {}),
+  });
+
+  if (review.action !== "apply") return applied;
+
+  // APPLY: record the post-apply read-back verification. UNLIKE
+  // wordpress_post_update (whose write routes through updatePostViaMcp, which
+  // itself performs an independent re-read), this generic path forwards the
+  // raw ability call directly (§3.7) — so it performs its OWN independent
+  // post-apply re-read here, via the SAME readPostViaMcp wordpress_post_update
+  // uses, never trusting the ability's own write-response echo.
+  const seam = getWordPressDeps().cmsReview;
+  const postApply = await readPostViaMcp(instance, postId, undefined);
+  const readback = seam
+    ? await seam.recordApplyVerification({
+        operationId: review.operationId,
+        gateId: review.gate.gateId,
+        runId: review.gate.runId,
+        postApplyFields: {
+          title: postApply.title,
+          content: postApply.content,
+          excerpt: postApply.excerpt,
+          status: postApply.status,
+        },
+      })
+    : { ok: false, code: "seam-unbound" as const };
+
+  const reviewMeta = { operationId: review.operationId, ...readback };
+  // Best-effort merge: the ability's own response shape is not pinned by this
+  // change (this change is scoped to the trigger relocation, not field-shape
+  // equivalence). A non-object response is wrapped rather than spread into.
+  if (applied && typeof applied === "object" && !Array.isArray(applied)) {
+    return { ...(applied as Record<string, unknown>), review: reviewMeta };
+  }
+  return { result: applied, review: reviewMeta };
 }
 
 // ---------------------------------------------------------------------------
@@ -909,6 +1094,17 @@ export function createWordPressPrimitiveHandlers() {
             "(host @cinatra-ai/host:connector-instance-invoker unbound). Refusing to call without the governed channel.",
         );
       }
+      // cinatra-ai/cinatra#2022 — the relocated ability-name-keyed
+      // content-review trigger. wordpress_post_update (above) is not the only
+      // path to a content-write ability once this generic primitive is
+      // reachable — calling `ewpa/update-post` directly through here bypassed
+      // the review-before-publish gate entirely before this change. Runs
+      // BEFORE the mutating ability is forwarded; on hold/reject the
+      // invoke() call below is never made for that ability.
+      if (CONTENT_REVIEW_TARGET_ABILITIES.has(input.toolName)) {
+        return callReviewGatedSiteTool(invoke, input);
+      }
+
       // Forward args UNMODIFIED (§3.7); omit absent optionals rather than send an
       // explicit `undefined` over the capability boundary. NO connectorKey/kind
       // (host-derived, M6) and NO actor (host-derived from the MCP frame, §2.4).
