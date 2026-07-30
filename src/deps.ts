@@ -132,8 +132,10 @@ export type WordPressMcpInstance = {
  * primitives. NEVER carries `applicationPassword` or the Nango credential
  * binding (`providerConfigKey`/`connectionId`) — those are secret/credential
  * material that read-capable callers (incl. LLM tool paths) must never receive.
- * The `wordpress_instances_list` read handler returns this shape; write
- * primitives keep using the full `WordPressMcpInstance` row host-side.
+ * A read/list surface projecting redacted instance rows returns this shape
+ * (formerly the `wordpress_instances_list` primitive, deleted under
+ * cinatra-ai/cinatra#2022 PR-θ); write primitives keep using the full
+ * `WordPressMcpInstance` row host-side.
  */
 export type WordPressMcpPublicInstance = {
   id: string;
@@ -573,7 +575,9 @@ export interface WordPressConnectorDeps {
   isPrivateUrl: (url: string) => boolean;
   // ---- connection/instance-admin reads (`@cinatra-ai/host:wordpress-mcp`,
   //      cinatra#172 Stage H3 — `@/lib/wordpress-api` stays host-side) ----
-  /** Aggregate status for the `wordpress_status` primitive (host-bound). */
+  /** Aggregate connection status (host-bound). Backs the admin settings-page
+   * status badge; formerly also the `wordpress_status` primitive, deleted
+   * under cinatra-ai/cinatra#2022 PR-θ. */
   getApiStatus: () => WordPressApiStatus;
   // ---- in-admin MCP content-client auth seam (cinatra#1214 S1) ----
   /**
@@ -648,11 +652,14 @@ export interface WordPressConnectorDeps {
   // ---- per-user write-authority gate (cinatra#409; host-bound) ----
   /**
    * WRITE AUTHZ — per-user / per-connector-instance entitlement gate. EVERY
-   * WordPress write primitive (`wordpress_post_update`,
+   * WordPress write surface (the external-MCP toolbox's per-instance
+   * credentialed-tool injection today; formerly also the now-deleted
+   * per-operation write primitives — `wordpress_post_update`,
    * `wordpress_post_update_meta`, `wordpress_post_create_draft`,
-   * `wordpress_post_delete`, `wordpress_media_upload`) MUST `await` this BEFORE
-   * dispatching the write to its host writer. It THROWS on deny; resolving
-   * without throwing is the only "allow".
+   * `wordpress_post_delete`, `wordpress_media_upload` — removed under
+   * cinatra-ai/cinatra#2022 PR-θ) MUST `await` this BEFORE dispatching the
+   * write / injection. It THROWS on deny; resolving without throwing is the
+   * only "allow".
    *
    * Host-side the impl: (a) resolves the trusted actor from the active MCP
    * request frame (`resolveExtensionActorContext()` / `resolveExtensionActorSummary()`

@@ -2,80 +2,31 @@ import { z } from "zod";
 import type { ExtensionMcpToolServer, ExtensionMcpToolResult } from "@cinatra-ai/sdk-extensions";
 import {
   createWordPressPrimitiveHandlers,
-  postsListSchema,
-  createDraftSchema,
-  postStatusSchema,
-  uploadMediaSchema,
-  updateMetaSchema,
-  postUpdateSchema,
   siteToolCallSchema,
   siteToolsListSchema,
 } from "./handlers";
 
+// cinatra-ai/cinatra#2022 S7 (PR-θ): the 12 old wordpress_* facade tools
+// (wordpress_status, _instances_list, _post_create_draft, _post_status,
+// _post_delete, _media_upload, _posts_list, _pages_list, _post_get_latest,
+// _post_get, _post_update_meta, _post_update) are DELETED — they were thin
+// wrappers routing through the plugin's own cinatra-content-server
+// (Layer C, S8's deletion target) or, for the two in-admin editing tools
+// (_post_get/_post_update), through the governed connector-instance invoker
+// under the SAME transitional names. Callers reach the site's own MCP catalog
+// directly through the two generic primitives below (`wordpress_site_tool_call`
+// / `wordpress_site_tools_list`), which have been registered — dark — since S2.
 const TOOL_META: Record<string, { description: string; inputSchema: z.ZodTypeAny }> = {
-  "wordpress_status": {
-    description: "Get the current WordPress connector connection status.",
-    inputSchema: z.object({}),
-  },
-  "wordpress_instances_list": {
-    description: "List all configured WordPress instances.",
-    inputSchema: z.object({}),
-  },
-  "wordpress_post_create_draft": {
-    description: "Create a new draft post on a WordPress instance.",
-    inputSchema: createDraftSchema,
-  },
-  "wordpress_post_status": {
-    description:
-      "Get the current status of a WordPress post by its ID. For a WordPress page, pass postType: \"page\" (required — it routes to /wp/v2/pages/{id}); otherwise the id is read from the posts collection.",
-    inputSchema: postStatusSchema,
-  },
-  "wordpress_post_delete": {
-    description:
-      "Delete a WordPress post by its ID. For a WordPress page, pass postType: \"page\" (required — it routes to /wp/v2/pages/{id}); otherwise the id is deleted from the posts collection.",
-    inputSchema: postStatusSchema,
-  },
-  "wordpress_media_upload": {
-    description: "Upload a base64-encoded image to a WordPress media library.",
-    inputSchema: uploadMediaSchema,
-  },
-  "wordpress_posts_list": {
-    description:
-      "List recently published posts from a WordPress instance, ordered newest first. Returns metadata-only items (id, title, status, date, url) — no rendered HTML body or excerpt. If nextCursor is present, call again with cursor=<nextCursor> to retrieve the next page.",
-    inputSchema: postsListSchema,
-  },
-  "wordpress_pages_list": {
-    description:
-      "List recently published pages from a WordPress instance (the /wp/v2/pages collection), ordered newest first. Returns metadata-only items (id, title, status, date, url) — no rendered HTML body or excerpt. Use this to discover a page id, then read it with wordpress_post_get, check its status with wordpress_post_status, or delete it with wordpress_post_delete, passing postType: \"page\". wordpress_post_update does NOT support postType: \"page\" (it fails closed) — page editing has no supported primitive yet. If nextCursor is present, call again with cursor=<nextCursor> to retrieve the next page.",
-    inputSchema: postsListSchema,
-  },
-  "wordpress_post_get_latest": {
-    description:
-      "DEPRECATED ALIAS for wordpress_posts_list. List recently published posts from a WordPress instance, ordered newest first. Returns metadata-only items (id, title, status, date, url) — no rendered HTML body or excerpt. If nextCursor is present, call again with cursor=<nextCursor> to retrieve the next page.",
-    inputSchema: postsListSchema,
-  },
-  "wordpress_post_get": {
-    description: "Get a WordPress post by ID for in-admin editing, through the site's MCP content server (not a direct REST call). Returns the post's title, status, content, excerpt, slug, link, and admin URL. For a WordPress page, pass postType: \"page\".",
-    inputSchema: postStatusSchema,
-  },
-  "wordpress_post_update_meta": {
-    description:
-      "Update the meta fields of a WordPress post. Used to write Elementor layout data (_elementor_data, _elementor_edit_mode, _elementor_template_type) and other custom meta after a draft is created.",
-    inputSchema: updateMetaSchema,
-  },
-  "wordpress_post_update": {
-    description:
-      "Update a WordPress post's top-level fields (title, content, excerpt, status). Applies the provided fields to the post through the site's MCP content server (the in-admin editing path), not a direct REST call. Used by the wordpress-content-editor agent's demote-then-edit pattern: passing { status: 'draft', title, content } in one call demotes a published post AND applies edits, leaving the previous live revision in WordPress's revision history. Requires at least one editable field (title/content/excerpt/status). Returns { id, status, title, content, excerpt, adminUrl }. For post meta updates, use wordpress_post_update_meta.",
-    inputSchema: postUpdateSchema,
-  },
   // `wordpress_content_editor_run` is NOT registered here. cinatra-ai/cinatra
   // #2022 S7 extracted it into its own relay-only module (`./relay`) — see
   // the `registerWordPressPrimitives` loop below for why that keeps it off
   // tools/list (cinatra#246).
 
   // cinatra#2017 S2 — governed connector-instance invoker (Plane C). Registered
-  // + classified + wired, but DARK in S2 (delegated deny-by-default + no
-  // agent-run allowlist keep them off every live model surface; S7 cuts over).
+  // + classified + wired; shipped DARK in S2 (delegated deny-by-default + no
+  // agent-run allowlist kept them off every live model surface) — S7 cut over
+  // the perimeters that reach them and (PR-θ) deleted the old facade these
+  // primitives supersede.
   "wordpress_site_tool_call": {
     description:
       "Call any tool exposed by a connected WordPress site's own MCP catalog, through the governed connector-instance invoker. Provide toolName (and args matching that tool's schema). instanceId is required only when your session is not pinned to a single site; serverId only when the tool name is ambiguous across the site's enrolled MCP servers.",
