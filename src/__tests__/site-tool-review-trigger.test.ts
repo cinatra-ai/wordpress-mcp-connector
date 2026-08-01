@@ -22,7 +22,7 @@
 //   - the mutating ability is NEVER invoked while held/rejected
 //     (hold-before-forward);
 //   - a non-target ability is completely unaffected.
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, type Mock } from "vitest";
 
 import {
   createWordPressPrimitiveHandlers,
@@ -48,13 +48,23 @@ const listMcpInstancesMock = vi.fn((): WordPressMcpInstance[] => [
   },
 ]);
 
+// Mock signatures are DERIVED FROM THE DEPS CONTRACT itself, never restated —
+// so a change to either member's shape re-types these mocks (and their
+// `mock.calls` argument tuples) instead of silently drifting. A bare
+// `ReturnType<typeof vi.fn>` widens to vitest's default `Mock<Procedure |
+// Constructable>`, which is not assignable to the strictly-typed deps members.
+type RequireInstanceWriteAuthorityFn = WordPressConnectorDeps["requireInstanceWriteAuthority"];
+// `invokeSiteTool` is OPTIONAL on the deps (skew posture); the mock stands in
+// for the BOUND member, hence NonNullable.
+type InvokeSiteToolFn = NonNullable<WordPressConnectorDeps["invokeSiteTool"]>;
+
 // Rebound in beforeEach — every test gets a fresh mock, matching
 // cms-review-handler.test.ts's own convention for this exact deps member.
-let invokeSiteToolMock: ReturnType<typeof vi.fn>;
+let invokeSiteToolMock: Mock<InvokeSiteToolFn>;
 // Rebound in beforeEach too (parity with write-authority.test.ts's own
 // convention for this dep) — default ALLOW; individual tests override to
 // DENY (reject) to model the cinatra#409 gate's fail-closed decisions.
-let requireInstanceWriteAuthorityMock: ReturnType<typeof vi.fn>;
+let requireInstanceWriteAuthorityMock: Mock<RequireInstanceWriteAuthorityFn>;
 
 function registerStubDeps(extra: Partial<WordPressConnectorDeps> = {}) {
   registerWordPressConnector({
@@ -130,8 +140,8 @@ const MODEL_ACTOR = { actorType: "model", source: "agent" } as const;
 
 beforeEach(() => {
   vi.clearAllMocks();
-  invokeSiteToolMock = vi.fn();
-  requireInstanceWriteAuthorityMock = vi.fn(async () => {});
+  invokeSiteToolMock = vi.fn<InvokeSiteToolFn>();
+  requireInstanceWriteAuthorityMock = vi.fn<RequireInstanceWriteAuthorityFn>(async () => {});
   _resetWordPressDepsForTests();
 });
 
