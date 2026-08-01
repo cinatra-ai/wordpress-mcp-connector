@@ -1,7 +1,7 @@
 // cinatra-ai/cinatra#2022 — the relocated ability-name-keyed content-review
 // trigger.
 //
-// `wordpress_post_update`'s handler was, until wmc#100, the ONLY place in
+// The dedicated post-update tool's handler was, until wmc#100, the ONLY place in
 // this connector that called `evaluateStagedContentWrite` — the
 // review-before-publish TRIGGER that holds a staged content write
 // fail-closed until a human approves it. The GENERIC forwarding primitive,
@@ -9,7 +9,7 @@
 // review-triggering logic: a caller reaching `ewpa/update-post` directly
 // through it bypassed the gate entirely. wmc#100 relocated the trigger onto
 // `wordpress_site_tool_call` itself, keyed on ability name, BEFORE PR-θ
-// deleted `wordpress_post_update` (and its own now-redundant inline gate)
+// deleted that dedicated tool (and its own now-redundant inline gate)
 // along with the other 11 dead facade tools — so this suite now covers the
 // trigger's ONLY remaining home. (The dedicated tool's own gate test file,
 // `cms-review-handler.test.ts`, and the before/after parity suite that once
@@ -412,14 +412,14 @@ describe("wordpress_site_tool_call — relocated content-review trigger (cinatra
 });
 
 // ---------------------------------------------------------------------------
-// REMOVED (cinatra-ai/cinatra#2022 PR-θ): a "behavioral parity —
-// wordpress_post_update vs. wordpress_site_tool_call(ewpa/update-post)"
+// REMOVED (cinatra-ai/cinatra#2022 PR-θ): a "behavioral parity — the
+// dedicated post-update tool vs. wordpress_site_tool_call(ewpa/update-post)"
 // suite used to live here, driving the SAME staged write through both the
 // OLD dedicated tool path and the NEW generic path to prove identical
-// hold/approve/reject outcomes. PR-θ deletes `wordpress_post_update` (and
-// the ten other superseded facade tools) now that this relocation has
-// soaked — `createWordPressPrimitiveHandlers()` no longer has a
-// `wordpress_post_update` key, so a parity comparison against it can no
+// hold/approve/reject outcomes. PR-θ deletes that dedicated tool (and
+// the eleven other superseded facade tools) now that this relocation has
+// soaked — `createWordPressPrimitiveHandlers()` no longer has a key for it,
+// so a parity comparison against it can no
 // longer be driven. The equivalence this suite proved is not lost: it was
 // exercised for real, on both paths, while both existed (wmc#100), and the
 // design's own equivalence mapping (`.claude/scratch/s7-2022/DESIGN.md`

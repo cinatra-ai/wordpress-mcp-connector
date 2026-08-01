@@ -6,10 +6,12 @@ import {
   siteToolsListSchema,
 } from "./handlers";
 
-// cinatra-ai/cinatra#2022 S7 (PR-θ): the 12 old wordpress_* facade tools
-// (wordpress_status, _instances_list, _post_create_draft, _post_status,
-// _post_delete, _media_upload, _posts_list, _pages_list, _post_get_latest,
-// _post_get, _post_update_meta, _post_update) are DELETED — they were thin
+// cinatra-ai/cinatra#2022 S7 (PR-θ): the 12 old per-operation `wordpress_*`
+// facade tools are DELETED. They are enumerated once, in this repo's CHANGELOG
+// entry for that deletion, and are deliberately NOT re-spelled in shipped code
+// (cinatra#2022's close gate is a SHIPPED-CODE search that must return zero
+// hits for those names; this repo's CHANGELOG and the deletion-regression
+// tests that assert their ABSENCE keep them by design) — they were thin
 // wrappers routing through the plugin's own cinatra-content-server
 // (Layer C, S8's deletion target) or, for the two in-admin editing tools
 // (_post_get/_post_update), through the governed connector-instance invoker

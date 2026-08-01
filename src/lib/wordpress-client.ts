@@ -1253,8 +1253,8 @@ export function createWordPressClient(ctx: ExtensionHostContext): WordPressClien
   // cinatra#1214 S1 — the direct-REST in-admin get/update helpers
   // (`updateWordPressPost` → `POST /wp/v2/(posts|pages)/{id}` and
   // `readWordPressPost` → `GET /wp/v2/(posts|pages)/{id}?context=edit`) were
-  // DELETED. The in-admin `wordpress_post_get` / `wordpress_post_update`
-  // tool names that replaced them were themselves later deleted
+  // DELETED. The two in-admin editing tool names that replaced them (the
+  // dedicated post-read + post-update pair) were themselves later deleted
   // (cinatra-ai/cinatra#2022 PR-θ) after their transport was retargeted onto
   // the governed connector-instance invoker (`ewpa/get-post` /
   // `ewpa/update-post`, PR-τ) — no direct `/wp/v2/*` egress with a stored

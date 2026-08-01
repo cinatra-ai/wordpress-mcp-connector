@@ -8,7 +8,7 @@ Registers via `createWordPressModule()` (`src/mcp/module.ts`), which returns `{ 
 
 ## The generic catalog invoker replaced the 12 named tools
 
-cinatra-ai/cinatra#2022 (S7) deleted the 12 named per-operation tools this connector used to expose — `wordpress_status`, `wordpress_instances_list`, `wordpress_post_create_draft`, `wordpress_post_status`, `wordpress_post_delete`, `wordpress_media_upload`, `wordpress_posts_list`, `wordpress_pages_list`, `wordpress_post_get_latest`, `wordpress_post_get`, `wordpress_post_update_meta`, `wordpress_post_update` (PR #101). Every caller now reaches a connected site's own MCP catalog through two primitives only:
+cinatra-ai/cinatra#2022 (S7) deleted the 12 named per-operation tools this connector used to expose (PR #101). Their names are enumerated once, in the CHANGELOG entry for that deletion, and are deliberately not re-spelled here: cinatra#2022's close gate is a shipped-code search that must return zero hits for them — scoped, not raw: this repo's CHANGELOG (a historical record) and the deletion-regression tests that assert the names are ABSENT keep them by design. Every caller now reaches a connected site's own MCP catalog through two primitives only:
 
 - `wordpress_site_tools_list` — list the site's own catalog (paginated; `instanceId` required only when the session isn't pinned to a single site).
 - `wordpress_site_tool_call` — call an ability by that catalog's own `toolName` (e.g. `ewpa/get-post`, `ewpa/update-post`), forwarding `args` unmodified to the site.
@@ -17,7 +17,7 @@ Both are thin wrappers over the governed connector-instance invoker (`src/deps.t
 
 ## The content-review gate now lives on the generic path — `ewpa/update-post` only
 
-The old `wordpress_post_update` tool's inline review-before-publish trigger (`evaluateStagedContentWrite`, cinatra#2043) was relocated (PR #100) onto `wordpress_site_tool_call` itself, keyed on ability name, before the old tool was deleted (PR #101) — the no-silent-publish guarantee never lapsed for one commit. `CONTENT_REVIEW_TARGET_ABILITIES` (`src/mcp/handlers.ts`) is `{"ewpa/update-post"}` — the only ability gated today. When `wordpress_site_tool_call` is called with that `toolName`:
+The old dedicated post-update tool's inline review-before-publish trigger (`evaluateStagedContentWrite`, cinatra#2043) was relocated (PR #100) onto `wordpress_site_tool_call` itself, keyed on ability name, before the old tool was deleted (PR #101) — the no-silent-publish guarantee never lapsed for one commit. `CONTENT_REVIEW_TARGET_ABILITIES` (`src/mcp/handlers.ts`) is `{"ewpa/update-post"}` — the only ability gated today. When `wordpress_site_tool_call` is called with that `toolName`:
 
 - `instanceId` is required unconditionally (no session-pin fallback) — refuses rather than stage an unattributable review.
 - `args.post_id` must be a strict positive integer (`Number.isInteger`, the same semantics as `z.coerce.number().int().positive()` — including accepting an exponential-but-integral string like `"1e2"`).

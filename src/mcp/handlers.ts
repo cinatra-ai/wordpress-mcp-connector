@@ -1,21 +1,26 @@
 import { z } from "zod";
 import type { ExtensionPrimitiveRequest } from "@cinatra-ai/sdk-extensions";
-// cinatra-ai/cinatra#2022 S7 (PR-θ): the 12 old wordpress_* facade tools that
-// used to live here (wordpress_status, _instances_list, _post_create_draft,
-// _post_status, _post_delete, _media_upload, _posts_list, _pages_list,
-// _post_get_latest, _post_get, _post_update_meta, _post_update) are DELETED.
+// cinatra-ai/cinatra#2022 S7 (PR-θ): the 12 old per-operation `wordpress_*`
+// facade tools that used to live here are DELETED. They are enumerated once,
+// in this repo's CHANGELOG entry for that deletion, and are deliberately NOT
+// re-spelled anywhere in shipped code — cinatra#2022's close gate is a
+// SHIPPED-CODE search that must return zero hits for those names. It is
+// scoped, not a raw tree search: this repo's CHANGELOG (a historical record)
+// and the deletion-regression tests that assert the names are ABSENT
+// (`src/__tests__/registry-omission.test.ts`) keep them by design.
 // They were thin wrappers around either the plugin's own
 // `cinatra-content-server` (`callWordPressMcp`, `../lib/wordpress-mcp-client`,
-// now also deleted) or — for the two in-admin editing tools this design
-// called `wordpress_post_get`/`wordpress_post_update` — the governed
+// now also deleted) or — for the two in-admin editing tools (the dedicated
+// post-read + post-update pair) — the governed
 // connector-instance invoker under the same transitional names during PR-τ's
 // soak window. Every caller now reaches a connected site's own MCP catalog
 // directly through the two generic, already-governed primitives below
 // (`wordpress_site_tool_call` / `wordpress_site_tools_list`), which have been
 // registered — dark until S7's perimeter cutover — since S2.
 //
-// SURVIVING SUPPORT CODE, not dead weight: `wordpress_post_update`'s own
-// inline cinatra#2043 review-before-publish trigger (`evaluateStagedContentWrite`)
+// SURVIVING SUPPORT CODE, not dead weight: the deleted dedicated post-update
+// tool's own inline cinatra#2043 review-before-publish trigger
+// (`evaluateStagedContentWrite`)
 // was RELOCATED, before this deletion, onto the generic path itself — see the
 // "Ability-name-keyed content-review trigger" section below. `readPostViaMcp`
 // (current-content fetch + post-apply read-back) and its supporting helpers
@@ -121,11 +126,11 @@ export const siteToolsListSchema = z.object({
 // ---------------------------------------------------------------------------
 // Current-content read via the governed invoker (cinatra-ai/cinatra#2022).
 //
-// This used to back the dedicated `wordpress_post_get`/`wordpress_post_update`
-// tools (deleted by PR-θ, once their inline review-before-publish trigger was
-// relocated onto the generic path — see the section below). It survives
-// θ's deletion because the RELOCATED trigger still needs it: the same
-// current-content fetch + post-apply read-back `wordpress_post_update` used
+// This used to back the two dedicated in-admin editing tools (the post-read +
+// post-update pair, deleted by PR-θ, once their inline review-before-publish
+// trigger was relocated onto the generic path — see the section below). It
+// survives θ's deletion because the RELOCATED trigger still needs it: the same
+// current-content fetch + post-apply read-back the dedicated update tool used
 // to perform is now performed by `wordpress_site_tool_call`'s own
 // ability-keyed branch.
 //
@@ -257,7 +262,7 @@ function extractEwpaContent(data: Record<string, unknown>, toolName: string): st
  * `cinatra-post-get`-backed version) returned. Reused by the relocated
  * content-review trigger below for both its current-content fetch and its
  * post-apply read-back — the same helper the (now-deleted) dedicated
- * `wordpress_post_get` tool used. `postType:"page"` dispatches to
+ * in-admin post-read tool used. `postType:"page"` dispatches to
  * `ewpa/get-page` instead of `ewpa/get-post` (the pinned fixture's discovery
  * capture registers them as distinct abilities; see the section comment
  * above). */
@@ -294,14 +299,15 @@ async function readPostViaMcp(
 // Ability-name-keyed content-review trigger for the GENERIC invoker path
 // (cinatra-ai/cinatra#2022).
 //
-// `wordpress_post_update`'s handler used to be the ONLY place in this
+// The deleted dedicated post-update tool's handler used to be the ONLY place
+// in this
 // connector that called `evaluateStagedContentWrite` — the review-before-
 // publish TRIGGER that holds a staged content write fail-closed until a
 // human approves it. The GENERIC forwarding primitive, `wordpress_site_tool_call`,
 // was a bare pass-through with NO review-triggering logic of any kind: a
 // caller reaching the SAME mutating ability (`ewpa/update-post`) directly
 // through the generic path bypassed the gate entirely. wmc#100 relocated the
-// trigger call here, keyed on ability name, BEFORE `wordpress_post_update`
+// trigger call here, keyed on ability name, BEFORE that dedicated tool
 // (and the other 11 dead facade tools) were deleted by this same PR-θ — so
 // the guarantee this trigger provides is never dropped even for one commit.
 //
@@ -317,8 +323,8 @@ async function readPostViaMcp(
 // `cmsReview` and `invokeSiteTool` are already members of the SAME `deps`
 // object this file already reads.
 //
-// SCOPE — only `ewpa/update-post` is keyed here, the exact ability
-// `wordpress_post_update`'s own gate used to protect — a 1:1 relocation of
+// SCOPE — only `ewpa/update-post` is keyed here, the exact ability the
+// deleted dedicated update tool's own gate used to protect — a 1:1 relocation of
 // an existing guarantee, not a widening. `ewpa/create-post` (or any future
 // WordPress write ability) is a real, DISCLOSED completeness question left
 // OPEN by this change, not silently decided: `evaluateStagedContentWrite`'s
@@ -333,7 +339,7 @@ export const CONTENT_REVIEW_TARGET_ABILITIES: ReadonlySet<string> = new Set([EWP
 /**
  * The relocated review-before-publish trigger for the generic invoker path —
  * the SAME `evaluateStagedContentWrite` call the (now-deleted) dedicated
- * `wordpress_post_update` tool used to make, reusing the SAME `readPostViaMcp`
+ * post-update tool used to make, reusing the SAME `readPostViaMcp`
  * helper for the current-content fetch and the post-apply read-back, now
  * keyed generically off the ability name reaching `wordpress_site_tool_call`
  * directly (rather than off a dedicated tool's own schema-parsed fields).
@@ -384,7 +390,8 @@ async function callReviewGatedSiteTool(
   // Mirror the dedicated tool's own pre-gate hardening exactly: meta is not
   // covered by this ability, and a request with no editable field would
   // strand an APPROVED-but-inapplicable review at apply time. Fail BEFORE
-  // any capture, not after. `wordpress_post_update_meta` no longer exists
+  // any capture, not after. The dedicated per-operation meta-update tool no
+  // longer exists
   // (cinatra-ai/cinatra#2022 S7, PR-θ) — meta writes are NOT unsupported,
   // they simply live on a different ability than this review-gated one:
   // the site's own catalog exposes `ewpa/update-post-meta` separately from
@@ -558,7 +565,8 @@ export function createWordPressPrimitiveHandlers() {
       // cinatra-ai/cinatra#2022 — the relocated ability-name-keyed
       // content-review trigger. This is now the ONLY place in this connector
       // that calls `evaluateStagedContentWrite`: the dedicated tool that
-      // originally carried it (`wordpress_post_update`) is deleted (PR-θ),
+      // originally carried it (the per-operation post-update tool) is deleted
+      // (PR-θ),
       // once this relocation shipped and soaked (wmc#100). Runs BEFORE the
       // mutating ability is forwarded; on hold/reject the invoke() call
       // below is never made for that ability.
