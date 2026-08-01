@@ -133,7 +133,7 @@ export type WordPressMcpInstance = {
  * binding (`providerConfigKey`/`connectionId`) — those are secret/credential
  * material that read-capable callers (incl. LLM tool paths) must never receive.
  * A read/list surface projecting redacted instance rows returns this shape
- * (formerly the `wordpress_instances_list` primitive, deleted under
+ * (formerly the dedicated instances-list primitive, deleted under
  * cinatra-ai/cinatra#2022 PR-θ); write primitives keep using the full
  * `WordPressMcpInstance` row host-side.
  */
@@ -650,7 +650,8 @@ export interface WordPressConnectorDeps {
   // ---- connection/instance-admin reads (`@cinatra-ai/host:wordpress-mcp`,
   //      cinatra#172 Stage H3 — `@/lib/wordpress-api` stays host-side) ----
   /** Aggregate connection status (host-bound). Backs the admin settings-page
-   * status badge; formerly also the `wordpress_status` primitive, deleted
+   * status badge; formerly also the dedicated aggregate-status primitive,
+   * deleted
    * under cinatra-ai/cinatra#2022 PR-θ. */
   getApiStatus: () => WordPressApiStatus;
   // ---- in-admin MCP content-client auth seam (cinatra#1214 S1) ----
@@ -740,10 +741,10 @@ export interface WordPressConnectorDeps {
    * host's own governed connector-instance invoker
    * (`@cinatra-ai/host:connector-instance-invoker`) instead of this
    * connector-level gate — this dep is NOT awaited on that path. Formerly
-   * also awaited by the now-deleted per-operation write primitives —
-   * `wordpress_post_update`, `wordpress_post_update_meta`,
-   * `wordpress_post_create_draft`, `wordpress_post_delete`,
-   * `wordpress_media_upload` — removed under cinatra-ai/cinatra#2022 PR-θ.
+   * also awaited by the now-deleted per-operation write primitives (post
+   * update, post meta update, draft create, post delete and media upload —
+   * enumerated in this repo's CHANGELOG), removed under
+   * cinatra-ai/cinatra#2022 PR-θ.
    * Both current callers `await` this BEFORE dispatching their write /
    * injection. It THROWS on deny; resolving without throwing is the only
    * "allow".

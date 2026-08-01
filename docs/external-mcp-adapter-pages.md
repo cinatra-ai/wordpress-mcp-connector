@@ -52,10 +52,10 @@ ability**, so:
 
 **Use the two general-purpose primitives, `wordpress_site_tool_call` and
 `wordpress_site_tools_list`.** cinatra-ai/cinatra#2022 (S7, PR-θ) deleted the
-12 named Cinatra facade tools that used to cover this (`wordpress_pages_list`,
-`wordpress_post_get`, `wordpress_post_status`, `wordpress_post_delete`,
-`wordpress_post_update`, and the rest) — there is no dedicated per-operation
-page tool anymore. Both primitives forward, through the same governed
+12 named Cinatra facade tools that used to cover this (the per-operation page
+list, post read, post status, post delete and post update tools, and the rest;
+they are enumerated once, in the CHANGELOG entry for that deletion) — there is
+no dedicated per-operation page tool anymore. Both primitives forward, through the same governed
 connector-instance invoker (the same per-instance authorization + policy path
 the deleted named tools used internally), directly to whatever ability the
 connected site's own MCP catalog exposes — call `wordpress_site_tools_list`
@@ -69,7 +69,7 @@ single page by id — a distinct ability from `ewpa/get-post`, per the
 catalog's own discovery capture). **Page editing still has no known supported
 ability**: no distinct page-update ability was ever proven to exist in that
 catalog's discovery capture (only `ewpa/update-post`, which is post-shaped) —
-that was true of the old, now-deleted `wordpress_post_update` tool (which
+that was true of the old, now-deleted dedicated post-update tool (which
 failed closed on `postType: "page"` for exactly this reason) and remains true
 of the generic path, since the underlying site catalog hasn't changed. Call
 `wordpress_site_tools_list` to check what a given site's catalog actually
