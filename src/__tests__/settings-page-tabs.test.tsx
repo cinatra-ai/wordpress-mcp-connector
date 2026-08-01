@@ -75,14 +75,15 @@ vi.mock("../wordpress-remote-assist-install-card", () => ({
 
 // The site-tools card (cinatra-ai/cinatra#2022 S7) has its own test file
 // (wordpress-site-tools-card.test.tsx); stub it here for the same reason as
-// the cards above. The badge-derivation helper the page's per-instance header
-// consumes from the same module is stubbed to the legacy label so this test
-// stays scoped to the tab contract.
+// the cards above. Only the COMPONENT is stubbed: the badge derivation the
+// page's per-instance header calls lives in the directive-free
+// `wordpress-site-tools-health` module (a server component cannot call an
+// export of this `"use client"` module), and runs for real here — it is pure,
+// and with no health rows it yields the legacy "Connected" label.
 vi.mock("../wordpress-site-tools-card", () => ({
   WordPressSiteToolsCard: () => (
     <div data-testid="site-tools-card-stub">Site tools &amp; access</div>
   ),
-  deriveSiteConnectionBadge: () => ({ variant: "success" as const, label: "Connected" }),
 }));
 
 import { WordPressSettingsPage } from "../settings-page";
