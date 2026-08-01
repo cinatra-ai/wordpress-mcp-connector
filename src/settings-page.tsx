@@ -33,10 +33,13 @@ import { WordPressNangoConnectCard } from "./wordpress-nango-connect-card";
 import { WordPressTrustedSiteCard } from "./wordpress-trusted-site-card";
 import { WordPressLeastPrivilegeCard } from "./wordpress-least-privilege-card";
 import { WordPressRemoteAssistInstallCard } from "./wordpress-remote-assist-install-card";
-import {
-  WordPressSiteToolsCard,
-  deriveSiteConnectionBadge,
-} from "./wordpress-site-tools-card";
+import { WordPressSiteToolsCard } from "./wordpress-site-tools-card";
+// This page is a SERVER component. `deriveSiteConnectionBadge` MUST come from
+// the directive-free health module, never from the `"use client"` card: under
+// RSC every export of a client module is a client reference, so calling one
+// here throws at render and the whole Connections tab shows the error
+// boundary. Pinned by settings-page-boundary.test.ts.
+import { deriveSiteConnectionBadge } from "./wordpress-site-tools-health";
 
 // Per-instance trusted-site opt-in state resolved server-side for the settings
 // card (cinatra#2019). `policy === null` ⇒ the host does not expose the surface;

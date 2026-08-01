@@ -43,6 +43,8 @@ import type {
   SiteServerHealthRow,
   SiteToolPolicyRef,
 } from "./deps";
+import { healthLabel } from "./wordpress-site-tools-health";
+import type { SiteConnectionBadge } from "./wordpress-site-tools-health";
 
 /** The default aggregator server every instance auto-enrolls (mirrors the
  * host's `CATALOG_DEFAULT_SERVER_ID`; the S2 primitive suite pins the same
@@ -130,42 +132,17 @@ export function evaluatePipelineReadiness(
   return { state: "ready" };
 }
 
-/** Human labels for the host's probe classification. Any unrecognised value
- * (forward skew) falls back to the raw string — rendered, never a crash. */
-const HEALTH_LABELS: Record<string, string> = {
-  registered: "Available",
-  not_installed: "Adapter not installed",
-  auth_error: "Authentication error",
-  unreachable: "Unreachable",
-  catalog_unavailable: "Catalog unavailable",
-};
-
-function healthLabel(status: string | null): string {
-  if (status === null) return "Not checked yet";
-  return HEALTH_LABELS[status] ?? status;
-}
-
-export type SiteConnectionBadge = {
-  variant: "success" | "secondary" | "warning";
-  label: string;
-};
-
-/** The per-connection header badge, derived from real probe health instead of
- * the old static "Connected" text. `null` rows (a host without the enrollment
- * surface) keep the legacy meaning — the credential is saved — unchanged. */
-export function deriveSiteConnectionBadge(servers: SiteServerHealthRow[] | null): SiteConnectionBadge {
-  if (servers === null) return { variant: "success", label: "Connected" };
-  const enrolled = servers.filter((row) => row.status === "enrolled");
-  if (enrolled.length === 0) return { variant: "secondary", label: "No MCP servers enrolled" };
-  if (enrolled.some((row) => row.lastStatus === "registered")) {
-    return { variant: "success", label: "Connected" };
-  }
-  if (enrolled.every((row) => row.lastStatus === null)) {
-    return { variant: "secondary", label: "Connected — health unverified" };
-  }
-  const worst = enrolled.find((row) => row.lastStatus !== null && row.lastStatus !== "registered");
-  return { variant: "warning", label: healthLabel(worst?.lastStatus ?? null) };
-}
+// The probe-health derivation (`healthLabel`, `deriveSiteConnectionBadge`,
+// `SiteConnectionBadge`) lives in the directive-free
+// `wordpress-site-tools-health` module so the SERVER component
+// `settings-page.tsx` can call it too — an export of THIS module is a client
+// REFERENCE under RSC and throws when invoked on the server.
+//
+// Deliberately NOT re-exported from here: a re-export would leave the same
+// footgun loaded, since a future server-side importer could reach the
+// derivation through this client module again and reproduce the crash. The
+// health module is the one canonical import site; `settings-page-boundary`
+// pins that.
 
 type StagedPolicy = {
   mode: InstanceToolPolicyMode;

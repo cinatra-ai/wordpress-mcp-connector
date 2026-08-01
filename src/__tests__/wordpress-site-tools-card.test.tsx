@@ -26,11 +26,14 @@ import {
   DEFAULT_CATALOG_SERVER_ID,
   PIPELINE_REQUIREMENTS,
   WordPressSiteToolsCard,
-  deriveSiteConnectionBadge,
   evaluatePipelineReadiness,
   isRefAllowed,
   type WordPressSiteToolsCardProps,
 } from "../wordpress-site-tools-card";
+// The header-badge derivation is NOT an export of the card: the settings page
+// is a server component and must be able to call it, so it lives in the
+// directive-free health module (see settings-page-boundary.test.ts).
+import { deriveSiteConnectionBadge } from "../wordpress-site-tools-health";
 import type { InstanceToolPolicyView, SiteServerHealthRow } from "../deps";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
