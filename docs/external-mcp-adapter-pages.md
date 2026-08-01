@@ -3,7 +3,7 @@
 Cinatra can inject a public WordPress site's **external MCP adapter**
 (`WordPress/mcp-adapter`, which depends on `WordPress/abilities-api`) as an
 external MCP server, so an LLM provider can talk to the site directly — but
-only under the **trusted-site mode** contract (cinatra-ai/cinatra#2019 S4):
+only under the **trusted-site mode** contract:
 the assembling surface must be workspace chat, the instance needs a current
 per-instance opt-in with its consent acknowledgement unchanged since, the
 catalog must verify, and the host's descriptor-verified read set for that
@@ -51,8 +51,8 @@ ability**, so:
 ## Which path to use for pages
 
 **Use the two general-purpose primitives, `wordpress_site_tool_call` and
-`wordpress_site_tools_list`.** cinatra-ai/cinatra#2022 (S7, PR-θ) deleted the
-12 named Cinatra facade tools that used to cover this (the per-operation page
+`wordpress_site_tools_list`.** Cinatra deleted the
+12 named facade tools that used to cover this (the per-operation page
 list, post read, post status, post delete and post update tools, and the rest;
 they are enumerated once, in the CHANGELOG entry for that deletion) — there is
 no dedicated per-operation page tool anymore. Both primitives forward, through the same governed
@@ -101,8 +101,8 @@ For Cinatra to inject a site's adapter at all, every one of these must hold:
    workspace chat (agent-run/public-widget/session surfaces never inject),
    the instance needs a current per-instance opt-in with its consent
    acknowledgement unchanged since, the catalog must verify, and the host's
-   descriptor-verified read-tool set for that instance must be non-empty
-   (cinatra-ai/cinatra#2019 S4). On today's community-plugin stack that
+   descriptor-verified read-tool set for that instance must be non-empty.
+   On today's community-plugin stack that
    verified set is empty by capture, so even an otherwise-eligible,
    fully-opted-in site injects nothing yet.
 
