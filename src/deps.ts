@@ -200,152 +200,6 @@ export type RequireInstanceWriteAuthorityInput = {
 };
 
 // ---------------------------------------------------------------------------
-// S5 CMS content-review seam (cinatra#2043, epic #2037 S5 — the CONNECTOR half).
-//
-// The CORE half (#2082, on cinatra main) shipped `captureCmsContentSnapshot`
-// (the one-Tx snapshot substrate + produced event + `cms_snapshot_targets`
-// apply-binding) and `recordCmsApplyVerification` (the read-back verifier bound
-// to the STORED scope manifest). Both are host-internal `@/lib` / `@cinatra-ai/`
-// server modules — the connector can NEVER import them (the `@/` alias does not
-// resolve in the standalone package build, the whole reason for this deps-DI
-// slot). So the host publishes a small `@cinatra-ai/host:cms-review` capability
-// wrapping the three core seams, and `register.ts` binds it into this OPTIONAL
-// `cmsReview` member.
-//
-// FENCE / SKEW POSTURE — byte-identity when off: the member is OPTIONAL. A host
-// that predates S5 (or a standalone build) leaves it UNBOUND → the write path is
-// byte-identical to pre-S5 (equivalent to the review fence being OFF). When bound
-// the connector still consults `isReviewActive()` (the host's
-// `isLifecycleReviewOrchestrationActive()` fence, DEFAULT-OFF) on every write:
-// false → byte-identical pass-through, no capture, no extra fetch; true → the
-// staged content write is CAPTURED and HELD before it can reach WordPress.
-//
-// IDENTITY: the connector passes ONLY the non-identity write coordinates (the
-// pointer, the proposed content, the scope manifest, the resource + operation
-// ids). The host derives org / run / actor from the active MCP request frame
-// (exactly as `requireInstanceWriteAuthority` does) — identity is NEVER connector
-// input.
-// ---------------------------------------------------------------------------
-
-/** The closed set of field paths the review authorizes the apply to change.
- * Stored on `cms_snapshot_targets.scope_manifest`; read BACK by the verifier so
- * the apply can never widen what the capture-time review fixed. */
-export type CmsReviewScopeManifest = { paths: string[] };
-
-/** The external-pointer identity of the CMS target being staged (the objects
- * `connector-ref` pointer shape the core capture reshapes via
- * `buildConnectorRefSnapshotArtifact`). Bare identity only — never the body. */
-export type CmsReviewPointer = {
-  url: string;
-  connectorId: string;
-  externalId: string;
-  resolvedMimeType: string;
-  state: "linked" | "stale" | "dangling";
-  title?: string;
-  excerpt?: string;
-  remoteVersion?: string;
-};
-
-/** The resolved PROPOSED content the connector stages (exactly one of text /
- * bytesBase64 — the CMS field serialization is text). */
-export type CmsReviewResolvedContent = {
-  mime: string;
-  text?: string;
-  bytesBase64?: string;
-  sizeBytes?: number;
-  title?: string;
-};
-
-/** The non-identity coordinates of a staged CMS content write the connector
- * hands the host capture seam. */
-export type CmsReviewCaptureInput = {
-  pointer: CmsReviewPointer;
-  /** The PROPOSED post state (the review target the human approves). */
-  resolved: CmsReviewResolvedContent;
-  /** ISO capture timestamp (audit/correlation). */
-  capturedAt: string;
-  scopeManifest: CmsReviewScopeManifest;
-  /** The connector instance the write targets. */
-  connectorInstance: string;
-  /** `"post"` | `"page"` — the CMS resource class. */
-  resourceType: string;
-  /** The WordPress post/page id the write targets. */
-  cmsResourceId: string;
-  /** A CAS anchor over the CURRENT remote content (fetched before capture). */
-  baseRemoteRevisionRef: string | null;
-  /** Idempotency key on `cms_snapshot_targets` (unique) — a re-drive of the same
-   * proposal reuses the same target row (the outbox-apply substrate). */
-  operationId: string;
-  title?: string;
-};
-
-/** The snapshot identity a capture returns — the review/verification pin. */
-export type CmsReviewCaptureResult = {
-  artifactId: string;
-  snapshotRevisionId: string;
-  snapshotTargetId: string;
-  operationId: string;
-  producedEventId: string | null;
-};
-
-/** Disposition of a captured staged write's external effect, disposition-aware
- * (a plain held/not-held cannot tell approve from reject — both are "not held",
- * but a rejected effect must NEVER be applied). Host binds it over
- * `isArtifactEffectHeld` + the gate's terminal disposition:
- *   - `held`     — the review gate is pending (or a repair is in flight); HOLD.
- *   - `approved` — the gate resolved `approve`; the effect is released → APPLY.
- *   - `rejected` — the gate resolved `reject`; the effect is tombstoned → REFUSE.
- *   - `ungated`  — the org lattice permitted the effect without a gate → APPLY.
- *   - `unknown`  — no capture / indeterminate → fail-closed REFUSE. */
-export type CmsReviewDisposition = "held" | "approved" | "rejected" | "ungated" | "unknown";
-
-/** The gate a captured staged write is holding on (for surfacing + the read-back
- * binding). */
-export type CmsReviewGateRef = { gateId: string; runId: string } | null;
-
-/** Post-apply read-back input — the connector re-reads the applied WordPress
- * content and hands the host the flat field map; the host re-captures + projects
- * + calls `recordCmsApplyVerification` against the STORED scope manifest. */
-export type CmsReviewReadbackInput = {
-  operationId: string;
-  gateId: string;
-  runId: string;
-  /** The applied (post-apply) field values re-read from WordPress. */
-  postApplyFields: Record<string, string>;
-};
-
-export type CmsReviewReadbackResult = {
-  ok: boolean;
-  outcome?: "verified" | "drifted" | "unmet";
-  outOfScope?: string[];
-  code?: string;
-  error?: string;
-};
-
-/**
- * The host-bound S5 CMS content-review seam. OPTIONAL — unbound on a pre-S5 /
- * standalone host, where the write path stays byte-identical (fence OFF).
- */
-export type CmsReviewSeam = {
-  /** The host review-orchestration fence (`isLifecycleReviewOrchestrationActive()`,
-   * DEFAULT-OFF). False → the connector write path is byte-identical to pre-S5. */
-  isReviewActive: () => boolean;
-  /** Capture the proposed CMS content as a held, gate-able review target (one Tx:
-   * snapshot substrate + produced event + apply binding). Operation-idempotent on
-   * `operationId` (a re-drive returns the existing binding without re-minting). */
-  captureStagedWrite: (input: CmsReviewCaptureInput) => Promise<CmsReviewCaptureResult>;
-  /** The disposition of a captured staged write's external effect (see
-   * `CmsReviewDisposition`) — the connector's apply gate. */
-  resolveDisposition: (input: {
-    artifactId: string;
-    snapshotRevisionId: string;
-  }) => Promise<{ disposition: CmsReviewDisposition; gate: CmsReviewGateRef }>;
-  /** Record the post-apply read-back verification against the STORED scope
-   * manifest → `verified` / `drifted` / `unmet`. */
-  recordApplyVerification: (input: CmsReviewReadbackInput) => Promise<CmsReviewReadbackResult>;
-};
-
-// ---------------------------------------------------------------------------
 // Trusted-site mode — per-instance native read-injection opt-in (cinatra#2019).
 //
 // Trusted-site mode is the per-instance, default-OFF opt-in that lets the small
@@ -728,7 +582,7 @@ export interface WordPressConnectorDeps {
   /**
    * WRITE AUTHZ — per-user / per-connector-instance entitlement gate. Despite
    * the name, its two current live callers are NOT both writes: (a)
-   * `wordpress_site_tool_call`'s review-gated `ewpa/update-post` path only
+   * `wordpress_site_tool_call`'s `ewpa/update-post` path only
    * (`handlers.ts`'s `callReviewGatedSiteTool`) — a genuine WordPress content
    * write; and (b) the external-MCP toolbox's per-instance
    * credentialed-tool-injection eligibility check (`toolbox.ts`) — that
@@ -793,7 +647,7 @@ export interface WordPressConnectorDeps {
    * — and no live model surface reaches it in S2 anyway (delegated deny-by-default
    * + no agent-run allowlist), so the primitives stay dark until the S7 cutover.
    *
-   * OPTIONAL for skew (matching `cmsReview` / `resolveWidgetActor`): a deps binding
+   * OPTIONAL for skew (matching `resolveWidgetActor`): a deps binding
    * that predates this member leaves it UNBOUND. The handler then DENIES with a
    * descriptive fail-closed error (never calls an ungoverned path) — so an old /
    * partial binding fails closed rather than crashing opaquely.
@@ -809,18 +663,6 @@ export interface WordPressConnectorDeps {
    * for skew (same posture as `invokeSiteTool`).
    */
   listSiteTools?: (input: SiteToolsListInput) => Promise<SiteToolsListPage>;
-  // ---- S5 CMS content-review seam (cinatra#2043; host-bound; OPTIONAL) ----
-  /**
-   * The S5 review-before-publish seam (see `CmsReviewSeam`). OPTIONAL: unbound on
-   * a pre-S5 / standalone host → the staged content-write path is byte-identical
-   * to pre-S5 (equivalent to the review fence being OFF). When bound, every
-   * staged content write consults `isReviewActive()`; while the fence is ON the
-   * write is captured as an immutable review target and HELD before it can reach
-   * WordPress, and only an approved gate releases the apply. The host derives
-   * org/run/actor from the MCP request frame — the connector passes only the
-   * non-identity write coordinates.
-   */
-  cmsReview?: CmsReviewSeam;
   // ---- trusted-site native read-injection opt-in (cinatra#2019; host-bound; OPTIONAL) ----
   /**
    * Read the per-instance trusted-site opt-in state. Resolves `null` when the
