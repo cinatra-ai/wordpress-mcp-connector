@@ -15,15 +15,15 @@ cinatra-ai/cinatra#2022 (S7) deleted the 12 named per-operation tools this conne
 
 Both are thin wrappers over the governed connector-instance invoker (`src/deps.ts`'s `invokeSiteTool` / `listSiteTools`, host capability `@cinatra-ai/host:connector-instance-invoker`) — see `src/mcp/handlers.ts` and `src/mcp/registry.ts`. `docs/external-mcp-adapter-pages.md` has the current walkthrough of which ability ids a community "Enable Abilities for MCP" catalog exposes for posts/pages, and what still has no supported path (page editing).
 
-## The content-review gate now lives on the generic path — `ewpa/update-post` only
+## The page update ability — `ewpa/update-post` only
 
-The old dedicated post-update tool's inline review-before-publish trigger (`evaluateStagedContentWrite`, cinatra#2043) was relocated (PR #100) onto `wordpress_site_tool_call` itself, keyed on ability name, before the old tool was deleted (PR #101) — the no-silent-publish guarantee never lapsed for one commit. `CONTENT_REVIEW_TARGET_ABILITIES` (`src/mcp/handlers.ts`) is `{"ewpa/update-post"}` — the only ability gated today. When `wordpress_site_tool_call` is called with that `toolName`:
+`CONTENT_REVIEW_TARGET_ABILITIES` (`src/mcp/handlers.ts`) is `{"ewpa/update-post"}` — the only ability whose arguments are checked before the call. When `wordpress_site_tool_call` is called with that `toolName`:
 
-- `instanceId` is required unconditionally (no session-pin fallback) — refuses rather than stage an unattributable review.
+- `instanceId` is required unconditionally (no session-pin fallback) — the call is refused without one.
 - `args.post_id` must be a strict positive integer (`Number.isInteger`, the same semantics as `z.coerce.number().int().positive()` — including accepting an exponential-but-integral string like `"1e2"`).
-- `args.meta` is refused outright — meta writes go through `wordpress_site_tool_call` again with `toolName: "ewpa/update-post-meta"` (list the catalog first); they are never folded into the reviewed post payload.
-- Any argument outside `post_id`/`title`/`content`/`excerpt`/`status` is refused before any capture, so an out-of-scope field can never ride an unchanged-content "pass" verdict onto WordPress unreviewed.
-- On hold/reject the mutating call is never forwarded; on pass/apply it forwards `args` unmodified, then (on `apply`) records a post-apply read-back via `readPostViaMcp` — never trusting the ability's own write-response echo.
+- `args.meta` is refused outright — meta writes go through `wordpress_site_tool_call` again with `toolName: "ewpa/update-post-meta"` (list the catalog first); they are never folded into the post payload.
+- Any argument outside `post_id`/`title`/`content`/`excerpt`/`status` is refused before the call is forwarded.
+- The call is forwarded with `args` unmodified, and the invoker's result is returned as is.
 
 Every OTHER ability reachable through `wordpress_site_tool_call` is not content-review-gated today. Widening the keyed set (e.g. a future `ewpa/create-post`) is a deliberate, separate change — do not assume it is already covered.
 
@@ -34,12 +34,6 @@ There is no longer one schema-level constant across every WordPress primitive:
 - `wordpress_content_editor_run`'s schema (`src/mcp/relay.ts`) still declares `postId: z.coerce.number().int().positive()` — the widget sends `String(postId)`, and `.coerce` makes that work.
 - The review-gated `ewpa/update-post` path validates the snake_case `post_id` argument by hand inside `callReviewGatedSiteTool` (`src/mcp/handlers.ts`) — `siteToolCallSchema.args` is a generic `z.record(z.string(), z.unknown())`, so Zod can't apply a typed constraint to one key inside it.
 - No other ability gets any id validation from this connector at all — `wordpress_site_tool_call` forwards `args` unmodified to whatever the target ability's own schema expects.
-
-## Reading a post for the review trigger — `readPostViaMcp` / `extractEwpaContent`
-
-`readPostViaMcp` (`src/mcp/handlers.ts`) — not `src/lib/wordpress-api.ts`, which does not exist in this repo (cinatra#975 relocated it here as `src/lib/wordpress-client.ts`, and cinatra#1214 S1 later deleted its direct-REST post read/update helpers) — fetches a post/page through the governed invoker (`ewpa/get-post` / `ewpa/get-page`) for the review trigger's current-content fetch and post-apply read-back. `extractEwpaContent` checks `post_content` then `content` and **throws** if neither key is present; it never silently coerces missing content to `""`. `assertSupportedReadPostType` only allows `undefined`/`"post"`/`"page"` — a custom post type is refused rather than mis-routed (custom post types have their own `ewpa/get-cpt-item*` abilities this connector does not wire up).
-
-If you add a field the review trigger needs, extend `readPostViaMcp`'s return shape — the trigger's current-content fetch and its post-apply read-back both depend on it.
 
 ## `wordpress_content_editor_run` — A2A blocking dispatch, not a listed MCP tool
 
@@ -63,19 +57,15 @@ This repo cannot run its test suite standalone: it is a source mirror (`.github/
 
 ## Post-type routing
 
-Reads route post vs. page distinctly at two different layers:
+Reads route post vs. page distinctly in the direct-REST carve-outs:
 
-- The governed-invoker read (`readPostViaMcp`) dispatches `postType === "page"` to `ewpa/get-page`, everything else to `ewpa/get-post` — the pinned-fixture discovery capture registers them as distinct abilities.
 - The direct-REST carve-outs (`readWordPressPostStatus`, `deleteWordPressPost` in `src/lib/wordpress-client.ts`) route `postType === "page"` to `/wp/v2/pages/{id}`, else `/wp/v2/posts/{id}`.
 
-**No page-specific update ability exists.** `ewpa/update-post` is post-type-agnostic (WordPress core's `wp_update_post()` doesn't distinguish), so the review-gated write path always targets the post-shaped read ability for its current-content fetch and post-apply read-back, regardless of whether the resource is actually a page. `docs/external-mcp-adapter-pages.md` covers the practical fallout: page editing has no known supported ability today.
+**No page-specific update ability exists.** `ewpa/update-post` is post-type-agnostic (WordPress core's `wp_update_post()` doesn't distinguish), so the same update ability serves posts and pages. `docs/external-mcp-adapter-pages.md` covers the practical fallout: page editing has no known supported ability today.
 
-## Empty-field handling — scoped to the reviewed write only
+## Empty-field handling
 
-There is no longer a connector-wide "never write an empty field" guard covering every write. The one place it survives:
-
-- `resolveProposedState` (`src/integration/cms-review-trigger.ts`) drops an empty-string `content`/`excerpt` proposal as "not proposed" before diffing against current — WordPress applies `content: ""` as a literal wipe, so a title-only edit that also carries `content: ""` is treated as not touching content.
-- This only runs on the review-gated `ewpa/update-post` path (see above). Every other ability reached through `wordpress_site_tool_call` gets `args` forwarded unmodified — whatever that ability does with an empty string is between the caller and the site, not something this connector guards.
+There is no connector-wide "never write an empty field" guard. Every ability reached through `wordpress_site_tool_call`, `ewpa/update-post` included, gets `args` forwarded unmodified — whatever that ability does with an empty string is between the caller and the site, not something this connector guards.
 
 ## Direct-REST carve-outs
 
