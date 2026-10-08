@@ -1,7 +1,6 @@
 import Link from "next/link";
 import type { ExtensionHostContext } from "@cinatra-ai/sdk-extensions";
-import { Button } from "./components/ui/button";
-import { Input } from "./components/ui/input";
+import { Button, Input, Badge } from "@cinatra-ai/design-primitives";
 // The connector setup PAGE shell — renders the page header AND content in the
 // SAME centered Wide column (max-w-3xl · 768px), so the header's left edge
 // aligns with the content frame (app-connectors.html §II).
@@ -14,7 +13,6 @@ import { ConnectorSetupColumns } from "@cinatra-ai/sdk-ui/connector-setup-column
 // ratchet). TabsListRow pairs the tablist with the etched section rule so the
 // composition is never hand-rolled.
 import { Tabs, TabsListRow, TabsTrigger, TabsContent } from "@cinatra-ai/sdk-ui/tabs";
-import { Badge } from "./components/ui/badge";
 // Instance/status reads come from the host-bound deps slot (the extended
 // `@cinatra-ai/host:wordpress-mcp` service) — no `@/lib/wordpress-api` import
 // (cinatra#172 Stage H3).

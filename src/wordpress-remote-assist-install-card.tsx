@@ -25,9 +25,7 @@
 import { useActionState } from "react";
 import { useFormStatus } from "react-dom";
 
-import { Badge } from "./components/ui/badge";
-import { Button } from "./components/ui/button";
-import { Input } from "./components/ui/input";
+import { Badge, Button, Input } from "@cinatra-ai/design-primitives";
 import { installCatalogPluginRemoteAction } from "./setup-actions";
 import type { InstallCatalogPluginOutcome } from "./deps";
 
