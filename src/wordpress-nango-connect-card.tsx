@@ -5,9 +5,8 @@ import { useRouter } from "next/navigation";
 import NangoFrontend from "@nangohq/frontend";
 import type { NangoFrontendConfig } from "@cinatra-ai/sdk-ui/marketplace";
 import { toast } from "@cinatra-ai/sdk-ui/toast";
-import { Button } from "./components/ui/button";
+import { Button, InputGroup, InputGroupAddon, InputGroupInput } from "@cinatra-ai/design-primitives";
 import { LinkIcon } from "lucide-react";
-import { InputGroup, InputGroupAddon, InputGroupInput } from "./components/ui/input-group";
 
 export function WordPressNangoConnectCard({
   nangoFrontendConfig,

@@ -32,9 +32,7 @@
 import { useActionState, useMemo, useState } from "react";
 import { useFormStatus } from "react-dom";
 
-import { Badge } from "./components/ui/badge";
-import { Button } from "./components/ui/button";
-import { Input } from "./components/ui/input";
+import { Badge, Button, Input } from "@cinatra-ai/design-primitives";
 import { setWordPressInstanceToolPolicyAction } from "./setup-actions";
 import type {
   InstanceToolPolicyMode,

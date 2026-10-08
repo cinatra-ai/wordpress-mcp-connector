@@ -24,7 +24,7 @@
 // non-administrator." There is no code path in this component that renders an
 // empty/absent card.
 
-import { Badge } from "./components/ui/badge";
+import { Badge } from "@cinatra-ai/design-primitives";
 import type { ConnectedSiteMetadata } from "./deps";
 
 /** Shown whenever a role NAME is actually being relied on (the known states) —
