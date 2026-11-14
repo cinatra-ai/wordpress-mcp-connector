@@ -56,7 +56,7 @@ function registerInvokerDeps(overrides: Partial<WordPressConnectorDeps> = {}) {
 
 const MODEL_ACTOR = { actorType: "model", source: "agent" } as const;
 
-describe("wordpress_site_tool_call — governed invoker primitive", () => {
+describe("wordpress_site_tool_write — governed invoker primitive", () => {
   let handlers: ReturnType<typeof createWordPressPrimitiveHandlers>;
   beforeEach(() => {
     _resetWordPressDepsForTests();
@@ -67,15 +67,15 @@ describe("wordpress_site_tool_call — governed invoker primitive", () => {
   });
 
   const call = (input: unknown) =>
-    (handlers as any).wordpress_site_tool_call({
-      primitiveName: "wordpress_site_tool_call",
+    (handlers as any).wordpress_site_tool_write({
+      primitiveName: "wordpress_site_tool_write",
       input,
       actor: MODEL_ACTOR,
       mode: "agentic",
     });
 
   it("is registered as a handler key", () => {
-    expect(typeof (handlers as any).wordpress_site_tool_call).toBe("function");
+    expect(typeof (handlers as any).wordpress_site_tool_write).toBe("function");
   });
 
   it("forwards toolName + args VERBATIM to the host invoker and returns its result", async () => {
@@ -128,8 +128,8 @@ describe("wordpress_site_tool_call — governed invoker primitive", () => {
   // §2.4 — identity is host-derived; the handler never reads request.actor. A
   // malicious actor payload carrying a connectorKey must not leak into the call.
   it("reads NO actor from the request — a forged actor.connectorKey is ignored (§2.4)", async () => {
-    await (handlers as any).wordpress_site_tool_call({
-      primitiveName: "wordpress_site_tool_call",
+    await (handlers as any).wordpress_site_tool_write({
+      primitiveName: "wordpress_site_tool_write",
       input: { toolName: "core/ping", args: {} },
       actor: { actorType: "model", source: "agent", connectorKey: "drupal", userId: "attacker" },
       mode: "agentic",
@@ -156,8 +156,8 @@ describe("wordpress_site_tool_call — governed invoker primitive", () => {
     registerInvokerDeps({ invokeSiteTool: undefined });
     const h = createWordPressPrimitiveHandlers();
     await expect(
-      (h as any).wordpress_site_tool_call({
-        primitiveName: "wordpress_site_tool_call",
+      (h as any).wordpress_site_tool_write({
+        primitiveName: "wordpress_site_tool_write",
         input: { toolName: "core/ping", args: {} },
         actor: MODEL_ACTOR,
         mode: "agentic",

@@ -1,4 +1,4 @@
-// The post update ability of `wordpress_site_tool_call`. This suite pins:
+// The post update ability of `wordpress_site_tool_write`. This suite pins:
 //   - the ability's arguments are checked before any call is forwarded
 //     (instance id, post id, meta, out-of-scope fields, editable fields);
 //   - the per-instance write-authority gate runs before the call is
@@ -111,10 +111,10 @@ beforeEach(() => {
   _resetWordPressDepsForTests();
 });
 
-describe("wordpress_site_tool_call — relocated content-review trigger (cinatra-ai/cinatra#2022)", () => {
+describe("wordpress_site_tool_write — relocated content-review trigger (cinatra-ai/cinatra#2022)", () => {
   const call = (input: unknown, handlers: ReturnType<typeof createWordPressPrimitiveHandlers>) =>
-    (handlers as any).wordpress_site_tool_call({
-      primitiveName: "wordpress_site_tool_call",
+    (handlers as any).wordpress_site_tool_write({
+      primitiveName: "wordpress_site_tool_write",
       input,
       actor: MODEL_ACTOR,
       mode: "agentic",
@@ -230,7 +230,7 @@ describe("wordpress_site_tool_call — relocated content-review trigger (cinatra
     );
     expect(requireInstanceWriteAuthorityMock).toHaveBeenCalledWith({
       instanceId: "site-1",
-      primitiveName: "wordpress_site_tool_call",
+      primitiveName: "wordpress_site_tool_write",
     });
     expect(requireInstanceWriteAuthorityMock).toHaveBeenCalledTimes(1);
   });
@@ -262,7 +262,7 @@ describe("wordpress_site_tool_call — relocated content-review trigger (cinatra
 
 // ---------------------------------------------------------------------------
 // REMOVED (cinatra-ai/cinatra#2022 PR-θ): a "behavioral parity — the
-// dedicated post-update tool vs. wordpress_site_tool_call(ewpa/update-post)"
+// dedicated post-update tool vs. wordpress_site_tool_write(ewpa/update-post)"
 // suite used to live here, driving the SAME staged write through both the
 // OLD dedicated tool path and the NEW generic path to prove identical
 // hold/approve/reject outcomes. PR-θ deletes that dedicated tool (and

@@ -68,7 +68,13 @@ describe("registerWordPressPrimitives — post-deletion tool surface (cinatra-ai
       expect(registered).not.toContain(deleted);
     }
 
-    // Exactly the two generic primitives are registered — nothing else survived.
-    expect(registered.sort()).toEqual(["wordpress_site_tool_call", "wordpress_site_tools_list"]);
+    // Exactly the generic primitives are registered; nothing else survived. The
+    // read proxy and the write tool are split (cinatra#3745): only the write
+    // tool acts outward.
+    expect(registered.sort()).toEqual([
+      "wordpress_site_tool_call",
+      "wordpress_site_tool_write",
+      "wordpress_site_tools_list",
+    ]);
   });
 });

@@ -1,4 +1,4 @@
-// The post update ability of `wordpress_site_tool_call` answers with the
+// The post update ability of `wordpress_site_tool_write` answers with the
 // invoker's own result: the arguments reach the invoker unchanged, the invoker
 // is called once, and its result object is returned as is. The connector gives
 // its tools and creates no artifact, so no host service other than the invoker
@@ -21,7 +21,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("wordpress_site_tool_call — page update answers with the invoker's own result", () => {
+describe("wordpress_site_tool_write — page update answers with the invoker's own result", () => {
   it("P1: returns exactly the invoker's object, forwards the arguments once, and calls no host service besides the invoker and the write-authority gate", async () => {
     const invokerResult = { success: true, data: { post_id: 42, message: "Post updated successfully." } };
     const invokeSiteTool = vi.fn(async () => invokerResult);
@@ -49,8 +49,8 @@ describe("wordpress_site_tool_call — page update answers with the invoker's ow
     } as unknown as WordPressConnectorDeps);
 
     const handlers = createWordPressPrimitiveHandlers();
-    const result = await handlers.wordpress_site_tool_call({
-      primitiveName: "wordpress_site_tool_call",
+    const result = await handlers.wordpress_site_tool_write({
+      primitiveName: "wordpress_site_tool_write",
       input: { toolName: "ewpa/update-post", args: { post_id: 42, title: "New title" }, instanceId: "site-1" },
       actor: { actorType: "model", source: "agent" },
       mode: "agentic",
