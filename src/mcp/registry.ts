@@ -31,7 +31,12 @@ const TOOL_META: Record<string, { description: string; inputSchema: z.ZodTypeAny
   // primitives supersede.
   "wordpress_site_tool_call": {
     description:
-      "Call any tool exposed by a connected WordPress site's own MCP catalog, through the governed connector-instance invoker. Provide toolName (and args matching that tool's schema). instanceId is required only when your session is not pinned to a single site; serverId only when the tool name is ambiguous across the site's enrolled MCP servers.",
+      "Call a READ ability of a connected WordPress site's own MCP catalog, through the governed connector-instance invoker. Provide toolName (and args matching that tool's schema). An ability that writes or publishes is refused here: call wordpress_site_tool_write for it. instanceId is required only when your session is not pinned to a single site; serverId only when the tool name is ambiguous across the site's enrolled MCP servers.",
+    inputSchema: siteToolCallSchema,
+  },
+  "wordpress_site_tool_write": {
+    description:
+      "Call an ability of a connected WordPress site's own MCP catalog that writes or publishes, through the governed connector-instance invoker. Provide toolName (and args matching that tool's schema). In an agent run each call waits for the person's recorded decision. instanceId is required only when your session is not pinned to a single site; serverId only when the tool name is ambiguous across the site's enrolled MCP servers.",
     inputSchema: siteToolCallSchema,
   },
   "wordpress_site_tools_list": {
@@ -40,6 +45,16 @@ const TOOL_META: Record<string, { description: string; inputSchema: z.ZodTypeAny
     inputSchema: siteToolsListSchema,
   },
 };
+
+// cinatra#3745: `wordpress_site_tool_write` writes and publishes on a person's
+// behalf, so its registration declares `outward`: the host holds each call of
+// it during an agent run for the person's recorded decision. Its inputs carry
+// no stored item with a revision, so it names no subject. The read proxy and
+// the list tool declare nothing. A declaration only adds a hold; it never
+// authorizes a call, and a host that does not read the field ignores it.
+// Spread from a constant so an SDK config type without the field accepts it.
+const OUTWARD_TOOL_NAMES = new Set(["wordpress_site_tool_write"]);
+const OUTWARD = { outward: {} };
 
 export function registerWordPressPrimitives(server: ExtensionMcpToolServer) {
   const handlers = createWordPressPrimitiveHandlers();
@@ -62,6 +77,7 @@ export function registerWordPressPrimitives(server: ExtensionMcpToolServer) {
         title: name,
         description: meta.description,
         inputSchema: meta.inputSchema,
+        ...(OUTWARD_TOOL_NAMES.has(name) ? OUTWARD : {}),
       },
       async (input): Promise<ExtensionMcpToolResult> => {
         const result = await handler({

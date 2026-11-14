@@ -5,6 +5,7 @@
   },
   "primitives": [
     "wordpress_site_tool_call",
+    "wordpress_site_tool_write",
     "wordpress_site_tools_list"
   ]
 }
