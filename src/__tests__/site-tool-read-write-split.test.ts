@@ -35,6 +35,11 @@ function row(name: string, derivedClass: SiteToolRow["derivedClass"], serverId =
   };
 }
 
+// One catalog page; `next` is the paging token of the following page, absent on the last page.
+function catalogPage(tools: SiteToolRow[], next?: string): SiteToolsListPage {
+  return { tools, ...(next !== undefined ? { nextCursor: next } : {}), catalogRevision: "rev-1" };
+}
+
 function registeredConfigs(): Map<string, Record<string, unknown>> {
   const configs = new Map<string, Record<string, unknown>>();
   const server = {
@@ -141,6 +146,39 @@ describe("the site tools split into a read proxy and an outward write tool (cina
         mode: "agentic",
       }),
     ).rejects.toThrow(SITE_TOOL_READ_ONLY_REFUSAL);
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  it("the read proxy passes on a listing error and never calls the invoker", async () => {
+    listSiteToolsMock.mockRejectedValueOnce(new Error("catalog unavailable"));
+    await expect(read({ toolName: "x/note-get", instanceId: "wp-1" })).rejects.toThrow("catalog unavailable");
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  it("the read proxy refuses a read row on one page followed by a write row of the same name on a later page", async () => {
+    listSiteToolsMock
+      .mockResolvedValueOnce(catalogPage([row("x/dual", "read")], "c-2"))
+      .mockResolvedValueOnce(catalogPage([row("x/dual", "write", "srv-2")]));
+    await expect(read({ toolName: "x/dual", instanceId: "wp-1" })).rejects.toThrow(SITE_TOOL_READ_ONLY_REFUSAL);
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  it("the read proxy reads at most 20 catalog pages: a read row on the 20th page is forwarded", async () => {
+    for (let page = 1; page < 20; page++) {
+      listSiteToolsMock.mockResolvedValueOnce(catalogPage([], `c-${page + 1}`));
+    }
+    listSiteToolsMock.mockResolvedValueOnce(catalogPage([row("x/note-get", "read")]));
+    await read({ toolName: "x/note-get", instanceId: "wp-1" });
+    expect(listSiteToolsMock).toHaveBeenCalledTimes(20);
+    expect(invokeSiteToolMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("the read proxy refuses when the 20th catalog page still has a next page", async () => {
+    for (let page = 1; page <= 20; page++) {
+      listSiteToolsMock.mockResolvedValueOnce(catalogPage(page === 20 ? [row("x/note-get", "read")] : [], `c-${page + 1}`));
+    }
+    await expect(read({ toolName: "x/note-get", instanceId: "wp-1" })).rejects.toThrow(SITE_TOOL_READ_ONLY_REFUSAL);
+    expect(listSiteToolsMock).toHaveBeenCalledTimes(20);
     expect(invokeSiteToolMock).not.toHaveBeenCalled();
   });
 

@@ -271,6 +271,6 @@ describe("wordpress_site_tool_write — relocated content-review trigger (cinatr
 // so a parity comparison against it can no
 // longer be driven. The equivalence this suite proved is not lost: it was
 // exercised for real, on both paths, while both existed (wmc#100), and the
-// design's own equivalence mapping (`.claude/scratch/s7-2022/DESIGN.md`
-// §15.4) records the property-by-property comparison.
+// design's own equivalence mapping records the property-by-property
+// comparison.
 // ---------------------------------------------------------------------------
