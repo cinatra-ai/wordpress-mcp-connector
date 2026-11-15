@@ -50,17 +50,22 @@ ability**, so:
 
 ## Which path to use for pages
 
-**Use the two general-purpose primitives, `wordpress_site_tool_call` and
-`wordpress_site_tools_list`.** Cinatra deleted the
+**Use the general-purpose primitives `wordpress_site_tools_list`,
+`wordpress_site_tool_call` (read) and `wordpress_site_tool_write` (write).** Cinatra deleted the
 12 named facade tools that used to cover this (the per-operation page
 list, post read, post status, post delete and post update tools, and the rest;
 they are enumerated once, in the CHANGELOG entry for that deletion) — there is
-no dedicated per-operation page tool anymore. Both primitives forward, through the same governed
+no dedicated per-operation page tool anymore. All three primitives forward, through the same governed
 connector-instance invoker (the same per-instance authorization + policy path
 the deleted named tools used internally), directly to whatever ability the
 connected site's own MCP catalog exposes — call `wordpress_site_tools_list`
 first to discover the exact ability ids a given site advertises, then
-`wordpress_site_tool_call` with that `toolName` and matching `args`.
+call the ability with that `toolName` and matching `args`: `wordpress_site_tool_call`
+for a read, `wordpress_site_tool_write` for an ability that writes or publishes.
+`wordpress_site_tool_call` is read-only and refuses every other ability with one
+fixed message; `wordpress_site_tool_write` is the tool whose registration
+declares `outward`, so a host that reads the declaration holds its calls in an
+agent run for the person's recorded decision.
 
 For a site running the community "Enable Abilities for MCP" catalog, page
 discovery/read routes through that catalog's own ability ids (e.g.
@@ -114,8 +119,8 @@ For Cinatra to inject a site's adapter at all, every one of these must hold:
   or wrong. Regenerate it and re-save the instance.
 - **Adapter injected but no page tools appear** — expected. See above: the
   adapter exposes no page tools on the supported version. Use
-  `wordpress_site_tool_call` / `wordpress_site_tools_list` against the site's
-  own MCP catalog instead.
+  `wordpress_site_tool_call` / `wordpress_site_tool_write` / `wordpress_site_tools_list`
+  against the site's own MCP catalog instead.
 - **`Missing Mcp-Session-Id header`** — the caller skipped the `initialize`
   handshake or dropped the session header. Capture the `Mcp-Session-Id` from the
   `initialize` response and send it on every subsequent request.

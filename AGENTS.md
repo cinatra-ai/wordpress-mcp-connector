@@ -4,28 +4,39 @@ Package-specific guidance for `@cinatra-ai/wordpress-mcp-connector`. This is a s
 
 ## Package role
 
-Registers via `createWordPressModule()` (`src/mcp/module.ts`), which returns `{ registerCapabilities: registerWordPressPrimitives }` — exported from `src/index.ts` and the `./mcp-module` package subpath for the host to consume. Deps wiring is separate: `cinatra.serverEntry: "./register"` (`package.json`) binds `src/register.ts`'s `register(ctx)`, which adapts host capabilities into this connector's runtime `WordPressConnectorDeps` (`src/deps.ts`) — it does not itself register any MCP tool. The connector exposes two governed, model-visible MCP primitives — `wordpress_site_tool_call` and `wordpress_site_tools_list` — that forward to whatever ability a connected site's own MCP catalog advertises, rather than calling `/wp/v2/*` directly. A fixed set of direct-REST members survive as carve-outs (see below). It also provides the `WordPressSettingsPage` RSC (`src/settings-page.tsx`) for the connector's settings page.
+Registers via `createWordPressModule()` (`src/mcp/module.ts`), which returns `{ registerCapabilities: registerWordPressPrimitives }` — exported from `src/index.ts` and the `./mcp-module` package subpath for the host to consume. Deps wiring is separate: `cinatra.serverEntry: "./register"` (`package.json`) binds `src/register.ts`'s `register(ctx)`, which adapts host capabilities into this connector's runtime `WordPressConnectorDeps` (`src/deps.ts`) — it does not itself register any MCP tool. The connector exposes three governed, model-visible MCP primitives — `wordpress_site_tools_list`, `wordpress_site_tool_call` (read-only) and `wordpress_site_tool_write` — that forward to whatever ability a connected site's own MCP catalog advertises, rather than calling `/wp/v2/*` directly. A fixed set of direct-REST members survive as carve-outs (see below). It also provides the `WordPressSettingsPage` RSC (`src/settings-page.tsx`) for the connector's settings page.
 
 ## The generic catalog invoker replaced the 12 named tools
 
-cinatra-ai/cinatra#2022 (S7) deleted the 12 named per-operation tools this connector used to expose (PR #101). Their names are enumerated once, in the CHANGELOG entry for that deletion, and are deliberately not re-spelled here: cinatra#2022's close gate is a shipped-code search that must return zero hits for them — scoped, not raw: this repo's CHANGELOG (a historical record) and the deletion-regression tests that assert the names are ABSENT keep them by design. Every caller now reaches a connected site's own MCP catalog through two primitives only:
+cinatra-ai/cinatra#2022 (S7) deleted the 12 named per-operation tools this connector used to expose (PR #101). Their names are enumerated once, in the CHANGELOG entry for that deletion, and are deliberately not re-spelled here: cinatra#2022's close gate is a shipped-code search that must return zero hits for them — scoped, not raw: this repo's CHANGELOG (a historical record) and the deletion-regression tests that assert the names are ABSENT keep them by design. Every caller reaches a connected site's own MCP catalog through these primitives only:
 
 - `wordpress_site_tools_list` — list the site's own catalog (paginated; `instanceId` required only when the session isn't pinned to a single site).
-- `wordpress_site_tool_call` — call an ability by that catalog's own `toolName` (e.g. `ewpa/get-post`, `ewpa/update-post`), forwarding `args` unmodified to the site.
+- `wordpress_site_tool_call` - call a READ ability by that catalog's own `toolName` (e.g. `ewpa/get-post`), forwarding `args` unmodified to the site. It refuses every other ability (see the next section).
+- `wordpress_site_tool_write` - call any ability by that catalog's own `toolName` (e.g. `ewpa/update-post`, `ewpa/create-post`), forwarding `args` unmodified to the site. Writes and publishes go through this tool.
 
-Both are thin wrappers over the governed connector-instance invoker (`src/deps.ts`'s `invokeSiteTool` / `listSiteTools`, host capability `@cinatra-ai/host:connector-instance-invoker`) — see `src/mcp/handlers.ts` and `src/mcp/registry.ts`. `docs/external-mcp-adapter-pages.md` has the current walkthrough of which ability ids a community "Enable Abilities for MCP" catalog exposes for posts/pages, and what still has no supported path (page editing).
+All three are thin wrappers over the governed connector-instance invoker (`src/deps.ts`'s `invokeSiteTool` / `listSiteTools`, host capability `@cinatra-ai/host:connector-instance-invoker`) — see `src/mcp/handlers.ts` and `src/mcp/registry.ts`. `docs/external-mcp-adapter-pages.md` has the current walkthrough of which ability ids a community "Enable Abilities for MCP" catalog exposes for posts/pages, and what still has no supported path (page editing).
+
+## Read and write tools - `wordpress_site_tool_call` is read-only
+
+The platform holds a tool call during an agent run for the person's recorded decision when the tool's registration declares `outward`. The declaration is per registration, not per call, and agent runs also read the site through the catalog proxy, so the proxy is split in two:
+
+- `wordpress_site_tool_call` forwards an ability only when it is a known read (`KNOWN_READ_ABILITIES` in `src/mcp/handlers.ts`: the core `get-*` abilities and `ewpa/get-posts`, `ewpa/get-post`, `ewpa/get-page`, `ewpa/get-categories`) or when the site's catalog lists every row of that name with `derivedClass: "read"`. The `ewpa/*` abilities carry no annotations, so the catalog lists them as write; their reads are named in the constant. `KNOWN_WRITE_ABILITIES` (`ewpa/update-post`, `ewpa/create-post`) is refused whatever the catalog says.
+- Every other case gets one fixed message (`SITE_TOOL_READ_ONLY_REFUSAL`) before the invoker is called: a write or destructive row, a name that is read on one server and write on another, a name missing from the catalog, an unbound `listSiteTools`, and a catalog listing that does not end within 20 pages. A listing that throws passes its error on and never reaches the invoker.
+- `wordpress_site_tool_write` forwards any ability through the same governed path (the checks in the next section and the write gate included). Its registration declares `outward: {}`, with no `subject`, because its inputs carry no stored item with a revision. It is the only tool that declares `outward`: `OUTWARD_TOOL_NAMES` in `src/mcp/registry.ts` lists it. A declaration only adds a hold; a host that does not read the field ignores it.
+
+A new tool that writes or publishes on a person's behalf joins `OUTWARD_TOOL_NAMES`. A new read ability that the catalog does not classify as read joins `KNOWN_READ_ABILITIES` only after its read-only behavior is checked on the site.
 
 ## The page update ability — `ewpa/update-post` only
 
-`CONTENT_REVIEW_TARGET_ABILITIES` (`src/mcp/handlers.ts`) is `{"ewpa/update-post"}` — the only ability whose arguments are checked before the call. When `wordpress_site_tool_call` is called with that `toolName`:
+`CONTENT_REVIEW_TARGET_ABILITIES` (`src/mcp/handlers.ts`) is `{"ewpa/update-post"}` — the only ability whose arguments are checked before the call. When `wordpress_site_tool_write` is called with that `toolName` (`wordpress_site_tool_call` refuses it before any check):
 
 - `instanceId` is required unconditionally (no session-pin fallback) — the call is refused without one.
 - `args.post_id` must be a strict positive integer (`Number.isInteger`, the same semantics as `z.coerce.number().int().positive()` — including accepting an exponential-but-integral string like `"1e2"`).
-- `args.meta` is refused outright — meta writes go through `wordpress_site_tool_call` again with `toolName: "ewpa/update-post-meta"` (list the catalog first); they are never folded into the post payload.
+- `args.meta` is refused outright — meta writes go through `wordpress_site_tool_write` again with `toolName: "ewpa/update-post-meta"` (list the catalog first); they are never folded into the post payload.
 - Any argument outside `post_id`/`title`/`content`/`excerpt`/`status` is refused before the call is forwarded.
 - The call is forwarded with `args` unmodified, and the invoker's result is returned as is.
 
-Every OTHER ability reachable through `wordpress_site_tool_call` is not content-review-gated today. Widening the keyed set (e.g. a future `ewpa/create-post`) is a deliberate, separate change — do not assume it is already covered.
+Every OTHER ability reachable through `wordpress_site_tool_write` is not content-review-gated today. Widening the keyed set (e.g. a future `ewpa/create-post`) is a deliberate, separate change — do not assume it is already covered.
 
 ## `post_id` / `postId` — no single universal rule anymore
 
@@ -33,7 +44,7 @@ There is no longer one schema-level constant across every WordPress primitive:
 
 - `wordpress_content_editor_run`'s schema (`src/mcp/relay.ts`) still declares `postId: z.coerce.number().int().positive()` — the widget sends `String(postId)`, and `.coerce` makes that work.
 - The review-gated `ewpa/update-post` path validates the snake_case `post_id` argument by hand inside `callReviewGatedSiteTool` (`src/mcp/handlers.ts`) — `siteToolCallSchema.args` is a generic `z.record(z.string(), z.unknown())`, so Zod can't apply a typed constraint to one key inside it.
-- No other ability gets any id validation from this connector at all — `wordpress_site_tool_call` forwards `args` unmodified to whatever the target ability's own schema expects.
+- No other ability gets any id validation from this connector at all — the site tools forward `args` unmodified to whatever the target ability's own schema expects.
 
 ## `wordpress_content_editor_run` — A2A blocking dispatch, not a listed MCP tool
 
@@ -51,7 +62,7 @@ This repo cannot run its test suite standalone: it is a source mirror (`.github/
 
 1. Add an input schema (`z.object(...)`) in `handlers.ts`.
 2. Add the handler to `createWordPressPrimitiveHandlers()`.
-3. Add the tool metadata entry to `TOOL_META` in `registry.ts`.
+3. Add the tool metadata entry to `TOOL_META` in `registry.ts`. If the tool writes or publishes on a person's behalf, also add its name to `OUTWARD_TOOL_NAMES` there.
 4. Add a test case to `handlers.test.ts`.
 5. There is no `pnpm typecheck` script in this repo (`package.json` only declares `test` and `lint`) — run `pnpm lint` (eslint) locally; the cinatra host's CI Typecheck/Test jobs are authoritative here (see "Tests" above).
 
@@ -65,7 +76,7 @@ Reads route post vs. page distinctly in the direct-REST carve-outs:
 
 ## Empty-field handling
 
-There is no connector-wide "never write an empty field" guard. Every ability reached through `wordpress_site_tool_call`, `ewpa/update-post` included, gets `args` forwarded unmodified — whatever that ability does with an empty string is between the caller and the site, not something this connector guards.
+There is no connector-wide "never write an empty field" guard. Every ability reached through `wordpress_site_tool_write`, `ewpa/update-post` included, gets `args` forwarded unmodified — whatever that ability does with an empty string is between the caller and the site, not something this connector guards.
 
 ## Direct-REST carve-outs
 
