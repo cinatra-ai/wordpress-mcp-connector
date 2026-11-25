@@ -28,6 +28,30 @@ import type {
 type ListPage<T> = { items: T[]; total: number; nextCursor?: string };
 
 /**
+ * Input to the host's GUARDED site-tool call (cinatra#3745), declared here
+ * structurally so the connector builds against an SDK that predates the
+ * guarded method. It matches the SDK's `GuardedSiteToolCallInput`: the host
+ * runs the tool only when the row it resolves now has these annotations (and,
+ * with `expectedClass: "read"`, is read-class by the host's own classifier),
+ * and otherwise refuses with nothing executed.
+ */
+export type GuardedSiteToolCallInput = {
+  toolName: string;
+  args: Record<string, unknown>;
+  instanceId?: string;
+  /** REQUIRED: the non-empty `serverId` of the row the connector listed. */
+  serverId: string;
+  /** The `rawAnnotations` of the row the connector listed, as a plain object. */
+  expectedRawAnnotations: Record<string, unknown>;
+  expectedClass?: "read";
+};
+
+/** The fixed refusal of a call that needs the guarded method when the host does not have it. */
+export const SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL =
+  "wordpress_site_tool_call denied: this Cinatra host does not enforce guarded site-tool calls. " +
+  "Update Cinatra to read site tools.";
+
+/**
  * Blocking A2A dispatch to the wordpress-content-editor WayFlow agent. The host
  * owns the `@cinatra-ai/a2a` client, the `@cinatra-ai/llm` bearer-token mint, and
  * the `task.history` walk (the connector never sees an A2A `Task`). Returns the
@@ -653,6 +677,29 @@ export interface WordPressConnectorDeps {
    * partial binding fails closed rather than crashing opaquely.
    */
   invokeSiteTool?: (input: SiteToolCallInput) => Promise<unknown>;
+  /**
+   * GUARDED SITE-TOOL CALL (cinatra#3745) - backs the read tool
+   * `wordpress_site_tool_call`, which relies on the catalog row it listed. The
+   * host runs the call only when the row it resolves now is still that row
+   * (same server, same raw annotations, read class when asserted) and refuses
+   * with `catalog_entry_changed` / `catalog_entry_not_read` otherwise.
+   * `register.ts` binds it with an inline presence test of the host method: on
+   * a host without the method it rejects with
+   * `SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL` and sends nothing. It never falls
+   * back to `invokeSiteTool`. OPTIONAL for skew: an unbound member denies the
+   * read tool the same way.
+   */
+  invokeSiteToolGuarded?: (input: GuardedSiteToolCallInput) => Promise<unknown>;
+  /**
+   * Whether the host has the guarded method (cinatra#3745). `register.ts`
+   * resolves the host invoker service AT CALL TIME on every call (the service
+   * is resolved lazily, never at registration) and returns whether it has a
+   * callable `invokeSiteToolGuarded`. The read tool asks this FIRST and, on
+   * anything but `true`, answers `SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL` with
+   * no catalog read and no other host call. OPTIONAL for skew: unbound means
+   * unsupported.
+   */
+  siteToolGuardSupported?: () => boolean;
   /**
    * GOVERNED CATALOG LISTING — backs `wordpress_site_tools_list`. Same host-derived
    * identity + fail-closed posture as `invokeSiteTool`. The host runs the SAME pin

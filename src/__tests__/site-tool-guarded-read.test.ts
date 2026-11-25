@@ -1,0 +1,509 @@
+// cinatra#3745: the read tool relies on the catalog row it listed, so it calls
+// the host's GUARDED method (`invokeSiteToolGuarded`), which runs the tool only
+// when the row the host resolves now is the row the connector checked. A host
+// with the guarded method refuses an `invokeSiteTool` call that carries a guard
+// field, and a host without it ignores the field, so the read tool never sends
+// one through `invokeSiteTool` and never falls back to it. The write tool and
+// the review-gated helper keep the unguarded call and send no guard field.
+import { describe, expect, it, vi, beforeEach } from "vitest";
+import type { SiteToolRow, SiteToolsListPage } from "@cinatra-ai/sdk-extensions";
+
+import {
+  createWordPressPrimitiveHandlers,
+  SITE_TOOL_READ_ONLY_REFUSAL,
+  SITE_TOOL_CATALOG_CHANGED_REFUSAL,
+  SITE_TOOL_LISTED_ROW_REFUSAL,
+} from "@cinatra-ai/wordpress-mcp-connector/mcp-handlers";
+import { register } from "../register";
+import {
+  getWordPressDeps,
+  registerWordPressConnector,
+  _resetWordPressDepsForTests,
+  SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL,
+  type WordPressConnectorDeps,
+  type WordPressMcpInstance,
+} from "../deps";
+
+const invokeSiteToolMock = vi.fn(async (_input: unknown): Promise<unknown> => ({ ok: "unguarded" }));
+const invokeSiteToolGuardedMock = vi.fn(async (_input: unknown): Promise<unknown> => ({ ok: "guarded" }));
+const listSiteToolsMock = vi.fn(
+  async (_input: unknown): Promise<SiteToolsListPage> => ({ tools: [], catalogRevision: "rev-1" }),
+);
+
+function readRowOf(name: string, serverId = "srv-1"): SiteToolRow {
+  return {
+    name,
+    serverId,
+    inputSchema: {},
+    rawAnnotations: { readOnlyHint: true, title: "Read" },
+    derivedClass: "read",
+    policyStatus: "allowed",
+    cacheAgeMs: 0,
+    catalogRevision: "rev-1",
+  };
+}
+
+function unannotatedRowOf(name: string, serverId: string): SiteToolRow {
+  return { ...readRowOf(name, serverId), rawAnnotations: {}, derivedClass: "write" };
+}
+
+function hostError(code: string, message: string): Error {
+  return Object.assign(new Error(message), { name: "InvokerError", code });
+}
+
+function bind(extra: Partial<WordPressConnectorDeps> = {}) {
+  registerWordPressConnector({
+    invokeSiteTool: invokeSiteToolMock,
+    invokeSiteToolGuarded: invokeSiteToolGuardedMock,
+    siteToolGuardSupported: () => true,
+    listSiteTools: listSiteToolsMock,
+    ...extra,
+  } as unknown as WordPressConnectorDeps);
+}
+
+const call = (name: string, input: unknown) =>
+  (createWordPressPrimitiveHandlers() as any)[name]({
+    primitiveName: name,
+    input,
+    actor: { actorType: "model", source: "agent" },
+    mode: "agentic",
+  });
+const read = (input: unknown) => call("wordpress_site_tool_call", input);
+const write = (input: unknown) => call("wordpress_site_tool_write", input);
+
+beforeEach(() => {
+  _resetWordPressDepsForTests();
+  invokeSiteToolMock.mockReset().mockResolvedValue({ ok: "unguarded" });
+  invokeSiteToolGuardedMock.mockReset().mockResolvedValue({ ok: "guarded" });
+  listSiteToolsMock.mockReset().mockResolvedValue({ tools: [], catalogRevision: "rev-1" });
+});
+
+describe("the read tool calls the guarded method with the listed row (cinatra#3745)", () => {
+  it("sends exactly the listed row's server, annotations and the read class, and never invokeSiteTool", async () => {
+    bind();
+    listSiteToolsMock.mockResolvedValueOnce({ tools: [readRowOf("core/get-site-info")], catalogRevision: "rev-1" });
+    await expect(read({ toolName: "core/get-site-info", args: { a: 1 }, instanceId: "wp-1" })).resolves.toEqual({
+      ok: "guarded",
+    });
+    expect(invokeSiteToolGuardedMock).toHaveBeenCalledTimes(1);
+    expect(invokeSiteToolGuardedMock).toHaveBeenCalledWith({
+      toolName: "core/get-site-info",
+      args: { a: 1 },
+      instanceId: "wp-1",
+      serverId: "srv-1",
+      expectedRawAnnotations: { readOnlyHint: true, title: "Read" },
+      expectedClass: "read",
+    });
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  it("omits instanceId when the call has none", async () => {
+    bind();
+    listSiteToolsMock.mockResolvedValueOnce({ tools: [readRowOf("core/get-site-info")], catalogRevision: "rev-1" });
+    await read({ toolName: "core/get-site-info" });
+    expect(invokeSiteToolGuardedMock).toHaveBeenCalledWith({
+      toolName: "core/get-site-info",
+      args: {},
+      serverId: "srv-1",
+      expectedRawAnnotations: { readOnlyHint: true, title: "Read" },
+      expectedClass: "read",
+    });
+  });
+
+  it("an unannotated known ewpa read on the default server keeps the annotation guard and sends no class", async () => {
+    // The host's own classifier calls an unannotated row "write", so a read
+    // class assertion would refuse every unannotated ewpa read. The annotation
+    // guard ({} on the same server) still refuses a row that changed.
+    bind();
+    listSiteToolsMock.mockResolvedValueOnce({
+      tools: [unannotatedRowOf("ewpa/get-post", "mcp-adapter-default")],
+      catalogRevision: "rev-1",
+    });
+    await read({ toolName: "ewpa/get-post", args: { post_id: 42 }, instanceId: "wp-1" });
+    expect(invokeSiteToolGuardedMock).toHaveBeenCalledWith({
+      toolName: "ewpa/get-post",
+      args: { post_id: 42 },
+      instanceId: "wp-1",
+      serverId: "mcp-adapter-default",
+      expectedRawAnnotations: {},
+    });
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  it("deps without the guarded method: denied with the fixed message, nothing listed or called", async () => {
+    bind({ invokeSiteToolGuarded: undefined });
+    await expect(read({ toolName: "core/get-site-info", instanceId: "wp-1" })).rejects.toThrow(
+      SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL,
+    );
+    expect(listSiteToolsMock).not.toHaveBeenCalled();
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+    expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+  });
+
+  it("catalog_entry_changed from the host becomes the tool's refusal; nothing else is called", async () => {
+    bind();
+    listSiteToolsMock.mockResolvedValueOnce({ tools: [readRowOf("core/get-site-info")], catalogRevision: "rev-1" });
+    invokeSiteToolGuardedMock.mockRejectedValueOnce(hostError("catalog_entry_changed", "host words"));
+    await expect(read({ toolName: "core/get-site-info", instanceId: "wp-1" })).rejects.toThrow(
+      SITE_TOOL_CATALOG_CHANGED_REFUSAL,
+    );
+    expect(invokeSiteToolGuardedMock).toHaveBeenCalledTimes(1);
+    expect(listSiteToolsMock).toHaveBeenCalledTimes(1);
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  it("catalog_entry_not_read from the host (not a read, or a class it does not know) becomes the read-only refusal", async () => {
+    bind();
+    listSiteToolsMock.mockResolvedValueOnce({ tools: [readRowOf("core/get-site-info")], catalogRevision: "rev-1" });
+    invokeSiteToolGuardedMock.mockRejectedValueOnce(hostError("catalog_entry_not_read", "host words"));
+    await expect(read({ toolName: "core/get-site-info", instanceId: "wp-1" })).rejects.toThrow(
+      SITE_TOOL_READ_ONLY_REFUSAL,
+    );
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  it("guarded_call_required from the host becomes the unsupported-host refusal", async () => {
+    bind();
+    listSiteToolsMock.mockResolvedValueOnce({ tools: [readRowOf("core/get-site-info")], catalogRevision: "rev-1" });
+    invokeSiteToolGuardedMock.mockRejectedValueOnce(hostError("guarded_call_required", "host words"));
+    await expect(read({ toolName: "core/get-site-info", instanceId: "wp-1" })).rejects.toThrow(
+      SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL,
+    );
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  it("any other host error passes on unchanged", async () => {
+    bind();
+    listSiteToolsMock.mockResolvedValueOnce({ tools: [readRowOf("core/get-site-info")], catalogRevision: "rev-1" });
+    const siteError = hostError("tool_error", "the site said no");
+    invokeSiteToolGuardedMock.mockRejectedValueOnce(siteError);
+    await expect(read({ toolName: "core/get-site-info", instanceId: "wp-1" })).rejects.toBe(siteError);
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("the write road sends no guard field (cinatra#3745)", () => {
+  it("the write tool calls invokeSiteTool without a guard field, even when the input carries one", async () => {
+    bind();
+    await write({
+      toolName: "ewpa/create-post",
+      args: { title: "T" },
+      instanceId: "wp-1",
+      serverId: "srv-1",
+      expectedRawAnnotations: { readOnlyHint: true },
+      expectedClass: "read",
+    });
+    expect(invokeSiteToolMock).toHaveBeenCalledWith({
+      toolName: "ewpa/create-post",
+      args: { title: "T" },
+      instanceId: "wp-1",
+      serverId: "srv-1",
+    });
+    const sent = invokeSiteToolMock.mock.calls[0]![0] as Record<string, unknown>;
+    expect("expectedRawAnnotations" in sent).toBe(false);
+    expect("expectedClass" in sent).toBe(false);
+    expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+  });
+
+  it("the review-gated post update helper calls invokeSiteTool without a guard field", async () => {
+    const instance: WordPressMcpInstance = {
+      id: "site-1",
+      siteUrl: "https://example.com",
+      username: "u",
+      applicationPassword: "p",
+      name: "Site 1",
+      createdAt: "",
+      updatedAt: "",
+    };
+    bind({
+      listMcpInstances: () => [instance],
+      requireInstanceWriteAuthority: vi.fn(async () => {}),
+    } as Partial<WordPressConnectorDeps>);
+    await write({
+      toolName: "ewpa/update-post",
+      args: { post_id: 7, title: "T" },
+      instanceId: "site-1",
+      expectedRawAnnotations: {},
+    });
+    expect(invokeSiteToolMock).toHaveBeenCalledWith({
+      toolName: "ewpa/update-post",
+      args: { post_id: 7, title: "T" },
+      instanceId: "site-1",
+    });
+    const sent = invokeSiteToolMock.mock.calls[0]![0] as Record<string, unknown>;
+    expect("expectedRawAnnotations" in sent).toBe(false);
+    expect("expectedClass" in sent).toBe(false);
+    expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("register(ctx) binds the guarded method with an inline presence test (cinatra#3745)", () => {
+  function activate(invoker: Record<string, unknown>) {
+    const ctx = {
+      capabilities: {
+        registerProvider: () => {},
+        resolveProviders: (capability: string) =>
+          capability === "@cinatra-ai/host:connector-instance-invoker"
+            ? [{ packageName: "@cinatra-ai/host", impl: invoker }]
+            : [],
+      },
+    } as never;
+    register(ctx);
+  }
+
+  const guardedInput = {
+    toolName: "core/get-site-info",
+    args: {},
+    serverId: "srv-1",
+    expectedRawAnnotations: { readOnlyHint: true },
+    expectedClass: "read" as const,
+  };
+
+  it("a host without invokeSiteToolGuarded: the guarded dep is denied and nothing is sent", async () => {
+    const hostInvokeSiteTool = vi.fn(async () => ({}));
+    activate({ invokeSiteTool: hostInvokeSiteTool, listSiteTools: vi.fn() });
+    const guarded = getWordPressDeps().invokeSiteToolGuarded;
+    expect(typeof guarded).toBe("function");
+    await expect(guarded!(guardedInput)).rejects.toThrow(SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL);
+    expect(hostInvokeSiteTool).not.toHaveBeenCalled();
+  });
+
+  it("a host with invokeSiteToolGuarded: the input reaches it unchanged and invokeSiteTool is not called", async () => {
+    const hostInvokeSiteTool = vi.fn(async () => ({}));
+    const hostGuarded = vi.fn(async () => ({ ran: true }));
+    activate({ invokeSiteTool: hostInvokeSiteTool, invokeSiteToolGuarded: hostGuarded, listSiteTools: vi.fn() });
+    await expect(getWordPressDeps().invokeSiteToolGuarded!(guardedInput)).resolves.toEqual({ ran: true });
+    expect(hostGuarded).toHaveBeenCalledWith(guardedInput);
+    expect(hostInvokeSiteTool).not.toHaveBeenCalled();
+  });
+
+  it("an old host end to end: the read tool is denied and NOTHING is called on the host, the catalog included", async () => {
+    const hostInvokeSiteTool = vi.fn(async () => ({}));
+    const hostList = vi.fn(async () => ({ tools: [readRowOf("core/get-site-info")], catalogRevision: "rev-1" }));
+    activate({ invokeSiteTool: hostInvokeSiteTool, listSiteTools: hostList });
+    await expect(read({ toolName: "core/get-site-info", instanceId: "wp-1" })).rejects.toThrow(
+      SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL,
+    );
+    expect(hostList).not.toHaveBeenCalled();
+    expect(hostInvokeSiteTool).not.toHaveBeenCalled();
+  });
+
+  it("an old host whose catalog listing fails still answers the fixed unsupported-host refusal", async () => {
+    const hostInvokeSiteTool = vi.fn(async () => ({}));
+    const hostList = vi.fn(async () => {
+      throw new Error("catalog unavailable");
+    });
+    activate({ invokeSiteTool: hostInvokeSiteTool, listSiteTools: hostList });
+    await expect(read({ toolName: "core/get-site-info", instanceId: "wp-1" })).rejects.toThrow(
+      SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL,
+    );
+    expect(hostList).not.toHaveBeenCalled();
+    expect(hostInvokeSiteTool).not.toHaveBeenCalled();
+  });
+
+  it("a supported host whose catalog listing fails reports the listing failure", async () => {
+    const hostInvokeSiteTool = vi.fn(async () => ({}));
+    const hostGuarded = vi.fn(async () => ({}));
+    const hostList = vi.fn(async () => {
+      throw new Error("catalog unavailable");
+    });
+    activate({ invokeSiteTool: hostInvokeSiteTool, invokeSiteToolGuarded: hostGuarded, listSiteTools: hostList });
+    await expect(read({ toolName: "core/get-site-info", instanceId: "wp-1" })).rejects.toThrow("catalog unavailable");
+    expect(hostGuarded).not.toHaveBeenCalled();
+    expect(hostInvokeSiteTool).not.toHaveBeenCalled();
+  });
+
+  it("presence is read from the host service at call time, on every call", async () => {
+    const invoker: Record<string, unknown> = { invokeSiteTool: vi.fn(), listSiteTools: vi.fn() };
+    activate(invoker);
+    const probe = getWordPressDeps().siteToolGuardSupported;
+    expect(typeof probe).toBe("function");
+    expect(probe!()).toBe(false);
+    invoker.invokeSiteToolGuarded = vi.fn();
+    expect(probe!()).toBe(true);
+  });
+});
+
+describe("the read tool checks host support first and sends only a usable listed row (cinatra#3745)", () => {
+  it("a host that reports no guard support: refused, nothing listed or called", async () => {
+    bind({ siteToolGuardSupported: () => false });
+    await expect(read({ toolName: "core/get-site-info", instanceId: "wp-1" })).rejects.toThrow(
+      SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL,
+    );
+    expect(listSiteToolsMock).not.toHaveBeenCalled();
+    expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  it("deps without the support probe: refused, nothing listed or called", async () => {
+    bind({ siteToolGuardSupported: undefined });
+    await expect(read({ toolName: "core/get-site-info", instanceId: "wp-1" })).rejects.toThrow(
+      SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL,
+    );
+    expect(listSiteToolsMock).not.toHaveBeenCalled();
+    expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  it("a listed row with no server id is refused before the call", async () => {
+    bind();
+    listSiteToolsMock.mockResolvedValueOnce({
+      tools: [{ ...readRowOf("core/get-site-info"), serverId: "" }],
+      catalogRevision: "rev-1",
+    });
+    await expect(read({ toolName: "core/get-site-info", instanceId: "wp-1" })).rejects.toThrow(
+      SITE_TOOL_LISTED_ROW_REFUSAL,
+    );
+    expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  it("an unannotated row with no annotations field sends a plain {}", async () => {
+    bind();
+    const { rawAnnotations: _omit, ...bare } = unannotatedRowOf("ewpa/get-post", "mcp-adapter-default");
+    listSiteToolsMock.mockResolvedValueOnce({ tools: [bare as SiteToolRow], catalogRevision: "rev-1" });
+    await read({ toolName: "ewpa/get-post", args: { post_id: 1 }, instanceId: "wp-1" });
+    const sent = invokeSiteToolGuardedMock.mock.calls[0]![0] as { expectedRawAnnotations: unknown };
+    expect(sent.expectedRawAnnotations).toEqual({});
+    expect(Object.getPrototypeOf(sent.expectedRawAnnotations)).toBe(Object.prototype);
+  });
+
+  // Annotations are JSON data only, at every depth: null, boolean, finite
+  // number, string, arrays of such and plain objects of such with string keys.
+  // Everything else is refused before the call with the exact refusal.
+  const notJson: Array<[string, () => unknown]> = [
+    ["a function", () => () => {}],
+    ["a symbol", () => Symbol("s")],
+    ["a bigint", () => BigInt(1)],
+    ["NaN", () => Number.NaN],
+    ["Infinity", () => Number.POSITIVE_INFINITY],
+    ["-Infinity", () => Number.NEGATIVE_INFINITY],
+    ["undefined", () => undefined],
+    ["a Map", () => new Map()],
+    ["a Set", () => new Set()],
+    ["a Date", () => new Date(0)],
+    ["a class instance", () => new (class Thing { a = 1 })()],
+  ];
+  const withValue = (where: string, value: unknown): Record<string, unknown> => {
+    if (where === "at top level") return { readOnlyHint: true, x: value };
+    if (where === "nested in an object") return { readOnlyHint: true, x: { y: value } };
+    return { readOnlyHint: true, x: [1, value] };
+  };
+  const cases: Array<[string, () => unknown]> = [];
+  for (const where of ["at top level", "nested in an object", "inside an array"]) {
+    for (const [kind, make] of notJson) cases.push([`${kind} ${where}`, () => withValue(where, make())]);
+  }
+  cases.push(
+    ["a Map as the whole value", () => Object.assign(new Map(), { readOnlyHint: true })],
+    ["a class instance as the whole value", () => new (class Annotations { readOnlyHint = true })()],
+    ["a symbol key", () => ({ readOnlyHint: true, [Symbol("k")]: 1 })],
+    ["a hole in an array", () => ({ readOnlyHint: true, x: [1, , 2] })],
+    [
+      "a cycle",
+      () => {
+        const a: Record<string, unknown> = { readOnlyHint: true };
+        a.self = a;
+        return a;
+      },
+    ],
+  );
+
+  it.each(cases)("annotations with %s are refused before the call", async (_label, make) => {
+    bind();
+    listSiteToolsMock.mockResolvedValueOnce({
+      tools: [{ ...readRowOf("core/get-site-info"), rawAnnotations: make() as never }],
+      catalogRevision: "rev-1",
+    });
+    await expect(read({ toolName: "core/get-site-info", instanceId: "wp-1" })).rejects.toThrow(
+      SITE_TOOL_LISTED_ROW_REFUSAL,
+    );
+    expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  // Bounds of the annotations walk: containers nest at most 32 deep below the
+  // annotations object, and at most 10 000 values are visited (the annotations
+  // object itself included). Past a bound the row is refused, never a RangeError.
+  const nest = (levels: number, inner: unknown, asArray = false): unknown => {
+    let value = inner;
+    for (let i = 0; i < levels; i++) value = asArray ? [value] : { a: value };
+    return value;
+  };
+  const listedWith = (rawAnnotations: unknown) =>
+    listSiteToolsMock.mockResolvedValueOnce({
+      tools: [{ ...readRowOf("core/get-site-info"), rawAnnotations: rawAnnotations as never }],
+      catalogRevision: "rev-1",
+    });
+
+  it.each([
+    ["objects 33 deep", () => ({ readOnlyHint: true, x: nest(33, 1) })],
+    ["arrays 33 deep", () => ({ readOnlyHint: true, x: nest(33, 1, true) })],
+    ["objects 200 000 deep", () => ({ readOnlyHint: true, x: nest(200_000, 1) })],
+    ["arrays 200 000 deep", () => ({ readOnlyHint: true, x: nest(200_000, 1, true) })],
+    ["an array of 9 998 values (10 001 in all)", () => ({ readOnlyHint: true, x: new Array(9_998).fill(0) })],
+    [
+      "an object of 10 000 keys",
+      () => ({ readOnlyHint: true, ...Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [`k${i}`, i])) }),
+    ],
+    ["a million values", () => ({ readOnlyHint: true, x: new Array(1_000_000).fill("v") })],
+    [
+      "a property getter that throws",
+      () =>
+        Object.defineProperty({ readOnlyHint: true }, "x", {
+          enumerable: true,
+          get() {
+            throw new Error("getter");
+          },
+        }),
+    ],
+  ])("annotations past a walk bound (%s) get the fixed refusal and nothing is called", async (_label, make) => {
+    bind();
+    listedWith(make());
+    await expect(read({ toolName: "core/get-site-info", instanceId: "wp-1" })).rejects.toThrow(
+      SITE_TOOL_LISTED_ROW_REFUSAL,
+    );
+    expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["objects 32 deep", () => ({ readOnlyHint: true, x: nest(32, 1) })],
+    ["arrays 32 deep", () => ({ readOnlyHint: true, x: nest(32, 1, true) })],
+    ["an array of 9 997 values (10 000 in all)", () => ({ readOnlyHint: true, x: new Array(9_997).fill(0) })],
+  ])("annotations at a walk bound (%s) are sent", async (_label, make) => {
+    bind();
+    listedWith(make());
+    await read({ toolName: "core/get-site-info", instanceId: "wp-1" });
+    expect(invokeSiteToolGuardedMock).toHaveBeenCalledTimes(1);
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  it("JSON data annotations at every depth are sent unchanged", async () => {
+    bind();
+    const annotations = {
+      readOnlyHint: true,
+      n: null,
+      f: 1.5,
+      s: "x",
+      list: [1, "a", null, { b: false }],
+      nested: Object.assign(Object.create(null), { c: [] }),
+    };
+    listSiteToolsMock.mockResolvedValueOnce({
+      tools: [{ ...readRowOf("core/get-site-info"), rawAnnotations: annotations }],
+      catalogRevision: "rev-1",
+    });
+    await read({ toolName: "core/get-site-info", instanceId: "wp-1" });
+    const sent = invokeSiteToolGuardedMock.mock.calls[0]![0] as { expectedRawAnnotations: unknown };
+    expect(sent.expectedRawAnnotations).toBe(annotations);
+  });
+
+  it("guarded_server_id_required from the host becomes a plain refusal", async () => {
+    bind();
+    listSiteToolsMock.mockResolvedValueOnce({ tools: [readRowOf("core/get-site-info")], catalogRevision: "rev-1" });
+    invokeSiteToolGuardedMock.mockRejectedValueOnce(hostError("guarded_server_id_required", "host words"));
+    await expect(read({ toolName: "core/get-site-info", instanceId: "wp-1" })).rejects.toThrow(
+      SITE_TOOL_LISTED_ROW_REFUSAL,
+    );
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+});

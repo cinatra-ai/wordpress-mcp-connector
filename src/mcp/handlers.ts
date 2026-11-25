@@ -24,6 +24,8 @@ import type { ExtensionPrimitiveRequest, SiteToolRow } from "@cinatra-ai/sdk-ext
 import {
   getWordPressDeps,
   listInstancesSorted,
+  SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL,
+  type GuardedSiteToolCallInput,
   type WordPressConnectorDeps,
 } from "../deps";
 
@@ -249,10 +251,6 @@ type SiteToolCallInput = {
   args: Record<string, unknown>;
   instanceId?: string;
   serverId?: string;
-  // Read tool only: the annotations of the catalog row the read check passed
-  // (see `readRow`). Not part of the SDK call input; today's host ignores it
-  // and nothing in this connector relies on it.
-  expectedRawAnnotations?: Record<string, unknown>;
 };
 
 function parseArgsJson(text: string): Record<string, unknown> {
@@ -315,14 +313,10 @@ function rowSaysRead(row: SiteToolRow): boolean {
 // null; a listing that throws passes its error on. The catalog is read on
 // every call, and the call follows the listing with no other wait.
 //
-// This check is not atomic with the call: the host resolves the call against
-// its own catalog snapshot, which can refresh after this listing, and today it
-// checks only the destructive class at execution (an ordinary write runs). The
-// caller pins the call to the row's `serverId` and also sends the row's
-// annotations as `expectedRawAnnotations`. Today's host copies only the fields
-// it knows and ignores this one, and nothing here relies on it: it is there
-// for a host that refuses an entry whose annotations differ from it, in the
-// same resolution that executes the call.
+// The host resolves the call against its own catalog snapshot, which can
+// refresh after this listing, so the caller sends the call through the host's
+// GUARDED method (`callGuardedRead`): the host runs it only when the row it
+// resolves now is this row (same server, same raw annotations, read class).
 async function readRow(input: SiteToolCallInput): Promise<SiteToolRow | null> {
   if (KNOWN_WRITE_ABILITIES.has(input.toolName)) return null;
   if (!KNOWN_READ_ABILITIES.has(input.toolName)) return null;
@@ -375,8 +369,116 @@ async function forwardSiteTool(input: SiteToolCallInput, tool: string): Promise<
     args: input.args,
     ...(input.instanceId !== undefined ? { instanceId: input.instanceId } : {}),
     ...(input.serverId !== undefined ? { serverId: input.serverId } : {}),
-    ...(input.expectedRawAnnotations !== undefined ? { expectedRawAnnotations: input.expectedRawAnnotations } : {}),
   });
+}
+
+// cinatra#3745: the fixed refusal when the host reports that the listed row
+// changed before the call ran (`catalog_entry_changed`).
+export const SITE_TOOL_CATALOG_CHANGED_REFUSAL =
+  "wordpress_site_tool_call refused: the site tool changed after it was listed. " +
+  "Nothing was run. Call wordpress_site_tool_call again to read the current catalog.";
+
+// cinatra#3745: the fixed refusal of a listed row the guarded call cannot carry
+// (no server id, or annotations that are not a plain object), and of the
+// host's `guarded_server_id_required`.
+export const SITE_TOOL_LISTED_ROW_REFUSAL =
+  "wordpress_site_tool_call refused: the listed site tool has no server id or its annotations are not plain data. " +
+  "Nothing was run.";
+
+// Bounds of the annotations walk. Annotations are small; a value past either
+// bound is refused like any other value that is not JSON data.
+const ANNOTATIONS_MAX_DEPTH = 32; // container nesting below the annotations object
+const ANNOTATIONS_MAX_VALUES = 10_000; // values visited, the annotations object included
+
+// Whether `value` is JSON data, at every depth. ALLOWED, and nothing else:
+// null, a boolean, a finite number, a string, an array whose every index
+// holds such a value (no holes), and a plain object (prototype
+// `Object.prototype` or `null`) with only string keys whose every value is
+// such a value. A key holding `undefined`, a function or a symbol is NOT
+// dropped (the host's canonical form would drop it and compare the row equal
+// to one without that key): it fails the check like any other value.
+// The walk is iterative (an explicit stack, no recursion) and bounded by
+// ANNOTATIONS_MAX_DEPTH and ANNOTATIONS_MAX_VALUES; a cycle exceeds the depth
+// bound. It never throws.
+function isJsonData(root: unknown): boolean {
+  const stack: Array<{ value: unknown; depth: number }> = [{ value: root, depth: 0 }];
+  let visited = 0;
+  while (stack.length > 0) {
+    const { value, depth } = stack.pop()!;
+    if (++visited > ANNOTATIONS_MAX_VALUES) return false;
+    if (value === null || typeof value === "boolean" || typeof value === "string") continue;
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) return false;
+      continue;
+    }
+    if (typeof value !== "object" || depth > ANNOTATIONS_MAX_DEPTH) return false;
+    // Pushing the children of one container cannot pass the value bound by more
+    // than its own size, which is checked before anything is pushed.
+    if (Array.isArray(value)) {
+      if (visited + value.length > ANNOTATIONS_MAX_VALUES) return false;
+      for (let i = 0; i < value.length; i++) {
+        if (!(i in value)) return false;
+        stack.push({ value: value[i], depth: depth + 1 });
+      }
+      continue;
+    }
+    const proto: unknown = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) return false;
+    if (Object.getOwnPropertySymbols(value).length > 0) return false;
+    const keys = Object.keys(value);
+    if (visited + keys.length > ANNOTATIONS_MAX_VALUES) return false;
+    for (const key of keys) stack.push({ value: (value as Record<string, unknown>)[key], depth: depth + 1 });
+  }
+  return true;
+}
+
+// The listed row's annotations as the guarded call carries them: an absent
+// value (an unannotated row) becomes a plain `{}`; anything but a plain object
+// of JSON data gives null and the call is refused.
+function guardAnnotations(raw: unknown): Record<string, unknown> | null {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== "object" || Array.isArray(raw)) return null;
+  try {
+    // A property getter could throw while the walk reads it; that is not data.
+    return isJsonData(raw) ? (raw as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+// The read tool's call, through the host's GUARDED method only. It sends the
+// listed row's server and raw annotations, and asserts the read class unless
+// the row is an unannotated known `ewpa/*` read on the default adapter server
+// (the host's classifier calls an unannotated row "write"; the annotation
+// guard still refuses a row that changed). Never falls back to
+// `invokeSiteTool`: an older host runs that call without the guards, and a
+// host with the guarded method refuses it when it carries a guard field.
+async function callGuardedRead(input: SiteToolCallInput, row: SiteToolRow): Promise<unknown> {
+  const guarded = getWordPressDeps().invokeSiteToolGuarded;
+  if (typeof guarded !== "function") throw new Error(SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL);
+  const annotations = guardAnnotations(row.rawAnnotations);
+  if (typeof row.serverId !== "string" || row.serverId.length === 0 || annotations === null) {
+    throw new Error(SITE_TOOL_LISTED_ROW_REFUSAL);
+  }
+  const readOnly = hint(annotations, "readOnlyHint", "readonly");
+  const call: GuardedSiteToolCallInput = {
+    toolName: input.toolName,
+    args: input.args,
+    ...(input.instanceId !== undefined ? { instanceId: input.instanceId } : {}),
+    serverId: row.serverId,
+    expectedRawAnnotations: annotations,
+    ...(readOnly !== undefined ? { expectedClass: "read" as const } : {}),
+  };
+  try {
+    return await guarded(call);
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code === "catalog_entry_changed") throw new Error(SITE_TOOL_CATALOG_CHANGED_REFUSAL, { cause: error });
+    if (code === "catalog_entry_not_read") throw new Error(SITE_TOOL_READ_ONLY_REFUSAL, { cause: error });
+    if (code === "guarded_server_id_required") throw new Error(SITE_TOOL_LISTED_ROW_REFUSAL, { cause: error });
+    if (code === "guarded_call_required") throw new Error(SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL, { cause: error });
+    throw error;
+  }
 }
 
 export function createWordPressPrimitiveHandlers() {
@@ -389,12 +491,21 @@ export function createWordPressPrimitiveHandlers() {
     // never read here for any decision.
     "wordpress_site_tool_call": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const input = parseSiteToolCallInput(request.input);
+      // cinatra#3745: a read needs the host's guarded method. Presence is
+      // decided first, from the host service at call time
+      // (`siteToolGuardSupported`); without it the tool is denied before the
+      // catalog is read or anything else is called on the host.
+      const deps = getWordPressDeps();
+      if (
+        typeof deps.invokeSiteToolGuarded !== "function" ||
+        typeof deps.siteToolGuardSupported !== "function" ||
+        deps.siteToolGuardSupported() !== true
+      ) {
+        throw new Error(SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL);
+      }
       const row = await readRow(input);
       if (row === null) throw new Error(SITE_TOOL_READ_ONLY_REFUSAL);
-      return forwardSiteTool(
-        { ...input, serverId: row.serverId, expectedRawAnnotations: row.rawAnnotations },
-        "wordpress_site_tool_call",
-      );
+      return callGuardedRead(input, row);
     },
 
     // cinatra#3745: every write and publish of a site ability; declared outward.

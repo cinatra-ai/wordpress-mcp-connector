@@ -26,6 +26,8 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type { ExtensionHostContext } from "@cinatra-ai/sdk-extensions";
 import {
   registerWordPressConnector,
+  SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL,
+  type GuardedSiteToolCallInput,
   type WordPressConnectorDeps,
   type NativeReadInjectionMode,
   type NativeReadInjectionPolicyView,
@@ -257,6 +259,28 @@ function buildHostBoundDeps(
     // from connectorInstanceInvoker() surfaces as a rejected promise the awaiting
     // handler denies on (fail-closed) — identical posture to the #409 gate above.
     invokeSiteTool: async (input) => connectorInstanceInvoker().invokeSiteTool(input),
+    // cinatra#3745 - the GUARDED call of the read tool. The host method's
+    // presence is the host's declaration that it enforces the guards; an older
+    // host does not have it (and an older SDK does not type it, hence the local
+    // structural read). Without it the call is DENIED here and nothing is sent:
+    // never a fallback to `invokeSiteTool`, which an older host runs unguarded.
+    invokeSiteToolGuarded: async (input) => {
+      const svc = connectorInstanceInvoker() as HostConnectorInstanceInvokerService & {
+        invokeSiteToolGuarded?: unknown;
+      };
+      const guarded = svc.invokeSiteToolGuarded;
+      if (typeof guarded !== "function") {
+        throw new Error(SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL);
+      }
+      return (guarded as (call: GuardedSiteToolCallInput) => Promise<unknown>).call(svc, input);
+    },
+    // cinatra#3745 - presence of the guarded method, read from the host service
+    // at call time on every call (the service resolves lazily, so the answer
+    // follows the host that serves the call). A host that has not published the
+    // invoker service at all throws here, as every invoker member does.
+    siteToolGuardSupported: () =>
+      typeof (connectorInstanceInvoker() as { invokeSiteToolGuarded?: unknown }).invokeSiteToolGuarded ===
+      "function",
     listSiteTools: async (input) => connectorInstanceInvoker().listSiteTools(input),
     // cinatra#2019 trusted-site mode — the per-instance native read-injection
     // opt-in surface, resolved lazily from the `@cinatra-ai/host:wordpress-mcp`
