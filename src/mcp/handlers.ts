@@ -24,6 +24,8 @@ import type { ExtensionPrimitiveRequest, SiteToolRow } from "@cinatra-ai/sdk-ext
 import {
   getWordPressDeps,
   listInstancesSorted,
+  SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL,
+  type GuardedSiteToolCallInput,
   type WordPressConnectorDeps,
 } from "../deps";
 
@@ -249,10 +251,6 @@ type SiteToolCallInput = {
   args: Record<string, unknown>;
   instanceId?: string;
   serverId?: string;
-  // Read tool only: the annotations of the catalog row the read check passed
-  // (see `readRow`). Not part of the SDK call input; today's host ignores it
-  // and nothing in this connector relies on it.
-  expectedRawAnnotations?: Record<string, unknown>;
 };
 
 function parseArgsJson(text: string): Record<string, unknown> {
@@ -315,14 +313,10 @@ function rowSaysRead(row: SiteToolRow): boolean {
 // null; a listing that throws passes its error on. The catalog is read on
 // every call, and the call follows the listing with no other wait.
 //
-// This check is not atomic with the call: the host resolves the call against
-// its own catalog snapshot, which can refresh after this listing, and today it
-// checks only the destructive class at execution (an ordinary write runs). The
-// caller pins the call to the row's `serverId` and also sends the row's
-// annotations as `expectedRawAnnotations`. Today's host copies only the fields
-// it knows and ignores this one, and nothing here relies on it: it is there
-// for a host that refuses an entry whose annotations differ from it, in the
-// same resolution that executes the call.
+// The host resolves the call against its own catalog snapshot, which can
+// refresh after this listing, so the caller sends the call through the host's
+// GUARDED method (`callGuardedRead`): the host runs it only when the row it
+// resolves now is this row (same server, same raw annotations, read class).
 async function readRow(input: SiteToolCallInput): Promise<SiteToolRow | null> {
   if (KNOWN_WRITE_ABILITIES.has(input.toolName)) return null;
   if (!KNOWN_READ_ABILITIES.has(input.toolName)) return null;
@@ -375,8 +369,44 @@ async function forwardSiteTool(input: SiteToolCallInput, tool: string): Promise<
     args: input.args,
     ...(input.instanceId !== undefined ? { instanceId: input.instanceId } : {}),
     ...(input.serverId !== undefined ? { serverId: input.serverId } : {}),
-    ...(input.expectedRawAnnotations !== undefined ? { expectedRawAnnotations: input.expectedRawAnnotations } : {}),
   });
+}
+
+// cinatra#3745: the fixed refusal when the host reports that the listed row
+// changed before the call ran (`catalog_entry_changed`).
+export const SITE_TOOL_CATALOG_CHANGED_REFUSAL =
+  "wordpress_site_tool_call refused: the site tool changed after it was listed. " +
+  "Nothing was run. Call wordpress_site_tool_call again to read the current catalog.";
+
+// The read tool's call, through the host's GUARDED method only. It sends the
+// listed row's server and raw annotations, and asserts the read class unless
+// the row is an unannotated known `ewpa/*` read on the default adapter server
+// (the host's classifier calls an unannotated row "write"; the annotation
+// guard still refuses a row that changed). Never falls back to
+// `invokeSiteTool`: an older host runs that call without the guards, and a
+// host with the guarded method refuses it when it carries a guard field.
+async function callGuardedRead(input: SiteToolCallInput, row: SiteToolRow): Promise<unknown> {
+  const guarded = getWordPressDeps().invokeSiteToolGuarded;
+  if (typeof guarded !== "function") throw new Error(SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL);
+  const annotations = row.rawAnnotations ?? {};
+  const readOnly = hint(annotations, "readOnlyHint", "readonly");
+  const call: GuardedSiteToolCallInput = {
+    toolName: input.toolName,
+    args: input.args,
+    ...(input.instanceId !== undefined ? { instanceId: input.instanceId } : {}),
+    serverId: row.serverId,
+    expectedRawAnnotations: annotations,
+    ...(readOnly !== undefined ? { expectedClass: "read" as const } : {}),
+  };
+  try {
+    return await guarded(call);
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code === "catalog_entry_changed") throw new Error(SITE_TOOL_CATALOG_CHANGED_REFUSAL, { cause: error });
+    if (code === "catalog_entry_not_read") throw new Error(SITE_TOOL_READ_ONLY_REFUSAL, { cause: error });
+    if (code === "guarded_call_required") throw new Error(SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL, { cause: error });
+    throw error;
+  }
 }
 
 export function createWordPressPrimitiveHandlers() {
@@ -389,12 +419,14 @@ export function createWordPressPrimitiveHandlers() {
     // never read here for any decision.
     "wordpress_site_tool_call": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const input = parseSiteToolCallInput(request.input);
+      // cinatra#3745: a read needs the host's guarded method; without it the
+      // tool is denied before the catalog is read or anything is sent.
+      if (typeof getWordPressDeps().invokeSiteToolGuarded !== "function") {
+        throw new Error(SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL);
+      }
       const row = await readRow(input);
       if (row === null) throw new Error(SITE_TOOL_READ_ONLY_REFUSAL);
-      return forwardSiteTool(
-        { ...input, serverId: row.serverId, expectedRawAnnotations: row.rawAnnotations },
-        "wordpress_site_tool_call",
-      );
+      return callGuardedRead(input, row);
     },
 
     // cinatra#3745: every write and publish of a site ability; declared outward.
