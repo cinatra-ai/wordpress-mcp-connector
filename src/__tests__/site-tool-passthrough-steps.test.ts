@@ -1,10 +1,10 @@
 // cinatra#3745 (owner decision 1234 A): a flow step reads the page and writes
 // the reviewed change without a model. The host serves a connector tool to such
 // a step when the tool's registration declares `passthroughStep`:
-//   - `wordpress_site_tool_call` declares "read" (served to a verified step
-//     without a person's decision, so it must never reach a writing ability);
 //   - `wordpress_site_tool_write` declares "publishing" (served only to a
-//     publishing step whose card a person released) and keeps `outward: {}`.
+//     publishing step whose card a person released) and keeps `outward: {}`;
+//   - `wordpress_site_tool_call` declares nothing yet: a "read" declaration
+//     waits until the host enforces the read class at execution.
 // A flow template renders its arguments as text, so both tools also take the
 // ability's arguments as JSON text (`argsJson`).
 import { describe, expect, it, vi, beforeEach } from "vitest";
@@ -84,9 +84,9 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
   const write = (input: unknown) => call("wordpress_site_tool_write", input);
 
   describe("registry declarations", () => {
-    it("declares passthroughStep \"read\" on the read tool and nothing outward on it", () => {
+    it("declares no passthroughStep and nothing outward on the read tool", () => {
       const config = registeredConfigs().get("wordpress_site_tool_call")!;
-      expect(config.passthroughStep).toBe("read");
+      expect("passthroughStep" in config).toBe(false);
       expect("outward" in config).toBe(false);
     });
 
@@ -96,20 +96,15 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
       expect(config.outward).toEqual({});
     });
 
-    it("declares passthroughStep on exactly these two tools", () => {
+    it("declares passthroughStep only on the write tool", () => {
       const declared = [...registeredConfigs()]
         .filter(([, config]) => "passthroughStep" in config)
         .map(([name, config]) => [name, config.passthroughStep]);
-      expect(declared.sort()).toEqual([
-        ["wordpress_site_tool_call", "read"],
-        ["wordpress_site_tool_write", "publishing"],
-      ]);
+      expect(declared).toEqual([["wordpress_site_tool_write", "publishing"]]);
     });
 
-    it("never declares \"read\" on a registration that declares outward", () => {
-      for (const [, config] of registeredConfigs()) {
-        if ("outward" in config) expect(config.passthroughStep).not.toBe("read");
-      }
+    it("declares \"read\" on no registration", () => {
+      for (const [, config] of registeredConfigs()) expect(config.passthroughStep).not.toBe("read");
     });
   });
 
@@ -343,7 +338,7 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
       expect(invokeSiteToolMock).not.toHaveBeenCalled();
     });
 
-    it("sends the annotations of the row it validated with the call, as the expectation the host can check", async () => {
+    it("sends the annotations of the row it validated with the call (today's host ignores the field)", async () => {
       const annotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true };
       listSiteToolsMock.mockResolvedValueOnce({
         tools: [row("cinatra/post-read", "read", annotations, DEFAULT_SERVER)],
@@ -372,35 +367,6 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
       );
       expect(listSiteToolsMock).toHaveBeenCalledTimes(2);
       expect(invokeSiteToolMock).toHaveBeenCalledTimes(1);
-    });
-
-    it("a row that changes between the listing and the call is caught by a host that checks the expectation", async () => {
-      // The live entry the host would execute; it turns into an ordinary write
-      // right after the connector's listing. The invoker below stands in for a
-      // host that compares the entry it executes with expectedRawAnnotations.
-      const live: { rawAnnotations: Record<string, unknown> } = { rawAnnotations: { readOnlyHint: true } };
-      const executed: unknown[] = [];
-      listSiteToolsMock.mockImplementationOnce(async () => {
-        const page = {
-          tools: [row("cinatra/post-read", "read", { ...live.rawAnnotations }, DEFAULT_SERVER)],
-          catalogRevision: "rev-1",
-        };
-        live.rawAnnotations = { readOnlyHint: false };
-        return page;
-      });
-      invokeSiteToolMock.mockImplementationOnce(async (input: unknown) => {
-        const { expectedRawAnnotations } = input as { expectedRawAnnotations?: unknown };
-        // Like today's host, a call that carries no expectation is executed.
-        if (expectedRawAnnotations !== undefined && JSON.stringify(expectedRawAnnotations) !== JSON.stringify(live.rawAnnotations)) {
-          throw new Error("catalog_entry_changed");
-        }
-        executed.push(input);
-        return { ok: true };
-      });
-      await expect(read({ toolName: "cinatra/post-read", args: { post_id: 3 }, instanceId: "wp-1" })).rejects.toThrow(
-        "catalog_entry_changed",
-      );
-      expect(executed).toEqual([]);
     });
 
     it("the publishing tool is unchanged: it lists no catalog and adds no server", async () => {
@@ -437,6 +403,36 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
         "catalog unavailable",
       );
       expect(invokeSiteToolMock).not.toHaveBeenCalled();
+    });
+  });
+
+  // The read check is not atomic with the call, and today's host ignores
+  // `expectedRawAnnotations`. Nothing in this connector relies on that field.
+  describe("a row that changes between the listing and the call", () => {
+    function changeAfterListing(live: { rawAnnotations: Record<string, unknown> }) {
+      listSiteToolsMock.mockImplementationOnce(async () => {
+        const page = {
+          tools: [row("cinatra/post-read", "read", { ...live.rawAnnotations }, DEFAULT_SERVER)],
+          catalogRevision: "rev-1",
+        };
+        live.rawAnnotations = { readOnlyHint: false };
+        return page;
+      });
+    }
+
+    it("the call carries the annotations of the row that was validated, not of the changed row", async () => {
+      changeAfterListing({ rawAnnotations: { readOnlyHint: true } });
+      await read({ toolName: "cinatra/post-read", args: { post_id: 3 }, instanceId: "wp-1" });
+      const sent = invokeSiteToolMock.mock.calls[0]![0] as { expectedRawAnnotations?: unknown };
+      expect(sent.expectedRawAnnotations).toEqual({ readOnlyHint: true });
+    });
+
+    it("known limit: a host that ignores the field, as today's host does, executes the changed row", async () => {
+      const live = { rawAnnotations: { readOnlyHint: true } as Record<string, unknown> };
+      changeAfterListing(live);
+      await read({ toolName: "cinatra/post-read", args: { post_id: 3 }, instanceId: "wp-1" });
+      expect(live.rawAnnotations).toEqual({ readOnlyHint: false });
+      expect(invokeSiteToolMock).toHaveBeenCalledTimes(1);
     });
   });
 });

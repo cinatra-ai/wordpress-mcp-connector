@@ -59,21 +59,17 @@ const OUTWARD = { outward: {} };
 // cinatra#3745 (owner decision 1234 A): a flow step reads the page and writes
 // the reviewed change without a model. The host serves a connector tool to such
 // a step only when its registration declares `passthroughStep`:
-//   - "read": served to a verified step whose tool list names the tool, with no
-//     person's decision; the host allows it only on a registration with no
-//     `outward`. The read tool serves only a known read whose catalog row, on the
-//     server that runs it, says read-only (`readRow` in ./handlers), and sends
-//     that row's annotations as `expectedRawAnnotations`. The check is not
-//     atomic with the call: the read class at execution must be enforced by
-//     the host. A host that serves "read" steps must refuse, in the same
-//     resolution that executes the call, an entry that is not read-class or
-//     whose annotations differ from `expectedRawAnnotations`.
 //   - "publishing": served only to a declared publishing step whose card a
 //     person released, consumed once per released decision.
+//   - "read" (served with no person's decision) is NOT declared on the read
+//     tool yet. Its catalog check is not atomic with the call, and today's host
+//     checks only the destructive class at execution, so a row that turned
+//     into an ordinary write would run. The declaration is added only after the
+//     host refuses, in the same resolution that executes the call, an entry
+//     that is not read-class (see AGENTS.md).
 // Spread from a constant, like `outward`, so an SDK config type without the
 // field accepts it. A host that does not read the field ignores it.
-const PASSTHROUGH_STEPS: Record<string, { passthroughStep: "read" | "publishing" }> = {
-  wordpress_site_tool_call: { passthroughStep: "read" },
+const PASSTHROUGH_STEPS: Record<string, { passthroughStep: "publishing" }> = {
   wordpress_site_tool_write: { passthroughStep: "publishing" },
 };
 

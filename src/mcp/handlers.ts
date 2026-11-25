@@ -211,7 +211,7 @@ async function callReviewGatedSiteTool(
 
 // cinatra#3745: `wordpress_site_tool_call` is READ-ONLY. A registration's
 // `outward` declaration holds every call of that tool in an agent run, and
-// agent runs and flow steps read through this proxy, so writes and publishes go
+// agent runs read through this proxy, so writes and publishes go
 // through `wordpress_site_tool_write` (declared outward in the registry)
 // instead. The read exemption is decided on the catalog row of the server that
 // will run the call, never on the ability name alone (`readRow`
@@ -250,7 +250,8 @@ type SiteToolCallInput = {
   instanceId?: string;
   serverId?: string;
   // Read tool only: the annotations of the catalog row the read check passed
-  // (see `readRow`). Not part of the SDK call input yet; today's host ignores it.
+  // (see `readRow`). Not part of the SDK call input; today's host ignores it
+  // and nothing in this connector relies on it.
   expectedRawAnnotations?: Record<string, unknown>;
 };
 
@@ -317,10 +318,11 @@ function rowSaysRead(row: SiteToolRow): boolean {
 // This check is not atomic with the call: the host resolves the call against
 // its own catalog snapshot, which can refresh after this listing, and today it
 // checks only the destructive class at execution (an ordinary write runs). The
-// caller therefore pins the call to the row's `serverId` and sends the row's
+// caller pins the call to the row's `serverId` and also sends the row's
 // annotations as `expectedRawAnnotations`. Today's host copies only the fields
-// it knows and ignores this one; the host must refuse an entry whose
-// annotations differ from it, in the same resolution that executes the call.
+// it knows and ignores this one, and nothing here relies on it: it is there
+// for a host that refuses an entry whose annotations differ from it, in the
+// same resolution that executes the call.
 async function readRow(input: SiteToolCallInput): Promise<SiteToolRow | null> {
   if (KNOWN_WRITE_ABILITIES.has(input.toolName)) return null;
   if (!KNOWN_READ_ABILITIES.has(input.toolName)) return null;
