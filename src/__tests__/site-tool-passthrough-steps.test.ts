@@ -172,6 +172,7 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
         write({ toolName: "ewpa/update-post", argsJson: '{"post_id":1,"slug":"x"}', instanceId: "wp-1" }),
       ).rejects.toThrow(/outside the content-review scope/);
       expect(invokeSiteToolMock).not.toHaveBeenCalled();
+      expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
     });
 
     it.each(["wordpress_site_tool_call", "wordpress_site_tool_write"] as const)(
@@ -181,6 +182,8 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
           call(tool, { toolName: "core/get-site-info", args: {}, argsJson: "{}", instanceId: "wp-1" }),
         ).rejects.toThrow(SITE_TOOL_ARGS_BOTH_REFUSAL);
         expect(invokeSiteToolMock).not.toHaveBeenCalled();
+        expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+        expect(listSiteToolsMock).not.toHaveBeenCalled();
       },
     );
 
@@ -200,6 +203,8 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
         expect((error as Error).message).not.toContain("secret-value");
       }
       expect(invokeSiteToolMock).not.toHaveBeenCalled();
+      expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+      expect(listSiteToolsMock).not.toHaveBeenCalled();
     });
 
     it("bounds the JSON text at 256 KiB, counted in UTF-8 bytes", async () => {
@@ -220,6 +225,7 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
         SITE_TOOL_ARGS_JSON_TOO_LARGE_REFUSAL,
       );
       expect(invokeSiteToolMock).toHaveBeenCalledTimes(1);
+      expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
     });
 
     it("the object form is unchanged: omitted args still forward as {}", async () => {
@@ -249,6 +255,7 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
       ).rejects.toThrow(SITE_TOOL_READ_ONLY_REFUSAL);
       expect(listSiteToolsMock).toHaveBeenCalledWith({ instanceId: "wp-1", serverId: "wps-other" });
       expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
     });
 
     it("refuses a known read name that a second server exposes as destructive, even with a read-only hint", async () => {
@@ -260,6 +267,7 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
         read({ toolName: "ewpa/get-post", args: { post_id: 1 }, instanceId: "wp-1", serverId: "wps-other" }),
       ).rejects.toThrow(SITE_TOOL_READ_ONLY_REFUSAL);
       expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
     });
 
     it("refuses a known read name the default server reads but a second server writes, when no server is named", async () => {
@@ -274,6 +282,7 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
         SITE_TOOL_READ_ONLY_REFUSAL,
       );
       expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
     });
 
     it("refuses a row whose stored annotations carry a destructive hint, whatever its class says", async () => {
@@ -285,6 +294,7 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
         SITE_TOOL_READ_ONLY_REFUSAL,
       );
       expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
     });
 
     it("refuses a known read name with no catalog row, and forwards nothing", async () => {
@@ -293,6 +303,7 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
         SITE_TOOL_READ_ONLY_REFUSAL,
       );
       expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
     });
 
     it("refuses when the only row of the name belongs to another server than the one named", async () => {
@@ -304,12 +315,14 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
         read({ toolName: "cinatra/post-read", args: { post_id: 1 }, instanceId: "wp-1", serverId: "wps-other" }),
       ).rejects.toThrow(SITE_TOOL_READ_ONLY_REFUSAL);
       expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
     });
 
     it("refuses an ability the catalog lists as read when its name is not a known read", async () => {
       listSiteToolsMock.mockResolvedValueOnce({ tools: [row("x/note-get", "read", readOnly)], catalogRevision: "rev-1" });
       await expect(read({ toolName: "x/note-get", instanceId: "wp-1" })).rejects.toThrow(SITE_TOOL_READ_ONLY_REFUSAL);
       expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
     });
 
     it("serves the genuine read and pins the call to the server whose row was read", async () => {
@@ -345,6 +358,7 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
         SITE_TOOL_READ_ONLY_REFUSAL,
       );
       expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
     });
 
     it("sends the annotations of the row it validated with the guarded call", async () => {
@@ -377,6 +391,7 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
       );
       expect(listSiteToolsMock).toHaveBeenCalledTimes(2);
       expect(invokeSiteToolGuardedMock).toHaveBeenCalledTimes(1);
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
     });
 
     it("the publishing tool is unchanged: it lists no catalog and adds no server", async () => {
@@ -394,6 +409,7 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
         read({ toolName: "cinatra/post-update-if-unchanged", argsJson: '{"post_id":1}', instanceId: "wp-1" }),
       ).rejects.toThrow(SITE_TOOL_READ_ONLY_REFUSAL);
       expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
     });
 
     it("refuses a known read whose row has no read-only annotation (the host lists it as write)", async () => {
@@ -405,6 +421,7 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
         SITE_TOOL_READ_ONLY_REFUSAL,
       );
       expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
     });
 
     it("refuses when the catalog cannot be read", async () => {
@@ -413,6 +430,7 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
         "catalog unavailable",
       );
       expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
     });
 
     it("never calls the unguarded method for a read", async () => {

@@ -137,6 +137,7 @@ describe("the read tool calls the guarded method with the listed row (cinatra#37
     );
     expect(listSiteToolsMock).not.toHaveBeenCalled();
     expect(invokeSiteToolMock).not.toHaveBeenCalled();
+    expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
   });
 
   it("catalog_entry_changed from the host becomes the tool's refusal; nothing else is called", async () => {
@@ -297,6 +298,7 @@ describe("register(ctx) binds the guarded method with an inline presence test (c
       SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL,
     );
     expect(hostList).not.toHaveBeenCalled();
+    expect(hostInvokeSiteTool).not.toHaveBeenCalled();
   });
 
   it("a supported host whose catalog listing fails reports the listing failure", async () => {
@@ -340,6 +342,7 @@ describe("the read tool checks host support first and sends only a usable listed
     );
     expect(listSiteToolsMock).not.toHaveBeenCalled();
     expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
   });
 
   it("a listed row with no server id is refused before the call", async () => {
@@ -415,6 +418,63 @@ describe("the read tool checks host support first and sends only a usable listed
       SITE_TOOL_LISTED_ROW_REFUSAL,
     );
     expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  // Bounds of the annotations walk: containers nest at most 32 deep below the
+  // annotations object, and at most 10 000 values are visited (the annotations
+  // object itself included). Past a bound the row is refused, never a RangeError.
+  const nest = (levels: number, inner: unknown, asArray = false): unknown => {
+    let value = inner;
+    for (let i = 0; i < levels; i++) value = asArray ? [value] : { a: value };
+    return value;
+  };
+  const listedWith = (rawAnnotations: unknown) =>
+    listSiteToolsMock.mockResolvedValueOnce({
+      tools: [{ ...readRowOf("core/get-site-info"), rawAnnotations: rawAnnotations as never }],
+      catalogRevision: "rev-1",
+    });
+
+  it.each([
+    ["objects 33 deep", () => ({ readOnlyHint: true, x: nest(33, 1) })],
+    ["arrays 33 deep", () => ({ readOnlyHint: true, x: nest(33, 1, true) })],
+    ["objects 200 000 deep", () => ({ readOnlyHint: true, x: nest(200_000, 1) })],
+    ["arrays 200 000 deep", () => ({ readOnlyHint: true, x: nest(200_000, 1, true) })],
+    ["an array of 9 998 values (10 001 in all)", () => ({ readOnlyHint: true, x: new Array(9_998).fill(0) })],
+    [
+      "an object of 10 000 keys",
+      () => ({ readOnlyHint: true, ...Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [`k${i}`, i])) }),
+    ],
+    ["a million values", () => ({ readOnlyHint: true, x: new Array(1_000_000).fill("v") })],
+    [
+      "a property getter that throws",
+      () =>
+        Object.defineProperty({ readOnlyHint: true }, "x", {
+          enumerable: true,
+          get() {
+            throw new Error("getter");
+          },
+        }),
+    ],
+  ])("annotations past a walk bound (%s) get the fixed refusal and nothing is called", async (_label, make) => {
+    bind();
+    listedWith(make());
+    await expect(read({ toolName: "core/get-site-info", instanceId: "wp-1" })).rejects.toThrow(
+      SITE_TOOL_LISTED_ROW_REFUSAL,
+    );
+    expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
+    expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["objects 32 deep", () => ({ readOnlyHint: true, x: nest(32, 1) })],
+    ["arrays 32 deep", () => ({ readOnlyHint: true, x: nest(32, 1, true) })],
+    ["an array of 9 997 values (10 000 in all)", () => ({ readOnlyHint: true, x: new Array(9_997).fill(0) })],
+  ])("annotations at a walk bound (%s) are sent", async (_label, make) => {
+    bind();
+    listedWith(make());
+    await read({ toolName: "core/get-site-info", instanceId: "wp-1" });
+    expect(invokeSiteToolGuardedMock).toHaveBeenCalledTimes(1);
     expect(invokeSiteToolMock).not.toHaveBeenCalled();
   });
 

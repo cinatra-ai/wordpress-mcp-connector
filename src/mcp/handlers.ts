@@ -385,6 +385,11 @@ export const SITE_TOOL_LISTED_ROW_REFUSAL =
   "wordpress_site_tool_call refused: the listed site tool has no server id or its annotations are not plain data. " +
   "Nothing was run.";
 
+// Bounds of the annotations walk. Annotations are small; a value past either
+// bound is refused like any other value that is not JSON data.
+const ANNOTATIONS_MAX_DEPTH = 32; // container nesting below the annotations object
+const ANNOTATIONS_MAX_VALUES = 10_000; // values visited, the annotations object included
+
 // Whether `value` is JSON data, at every depth. ALLOWED, and nothing else:
 // null, a boolean, a finite number, a string, an array whose every index
 // holds such a value (no holes), and a plain object (prototype
@@ -392,24 +397,39 @@ export const SITE_TOOL_LISTED_ROW_REFUSAL =
 // such a value. A key holding `undefined`, a function or a symbol is NOT
 // dropped (the host's canonical form would drop it and compare the row equal
 // to one without that key): it fails the check like any other value.
-function isJsonData(value: unknown, path: Set<object> = new Set()): boolean {
-  if (value === null || typeof value === "boolean" || typeof value === "string") return true;
-  if (typeof value === "number") return Number.isFinite(value);
-  if (typeof value !== "object" || path.has(value)) return false;
-  path.add(value);
-  let ok: boolean;
-  if (Array.isArray(value)) {
-    ok = true;
-    for (let i = 0; i < value.length && ok; i++) ok = i in value && isJsonData(value[i], path);
-  } else {
+// The walk is iterative (an explicit stack, no recursion) and bounded by
+// ANNOTATIONS_MAX_DEPTH and ANNOTATIONS_MAX_VALUES; a cycle exceeds the depth
+// bound. It never throws.
+function isJsonData(root: unknown): boolean {
+  const stack: Array<{ value: unknown; depth: number }> = [{ value: root, depth: 0 }];
+  let visited = 0;
+  while (stack.length > 0) {
+    const { value, depth } = stack.pop()!;
+    if (++visited > ANNOTATIONS_MAX_VALUES) return false;
+    if (value === null || typeof value === "boolean" || typeof value === "string") continue;
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) return false;
+      continue;
+    }
+    if (typeof value !== "object" || depth > ANNOTATIONS_MAX_DEPTH) return false;
+    // Pushing the children of one container cannot pass the value bound by more
+    // than its own size, which is checked before anything is pushed.
+    if (Array.isArray(value)) {
+      if (visited + value.length > ANNOTATIONS_MAX_VALUES) return false;
+      for (let i = 0; i < value.length; i++) {
+        if (!(i in value)) return false;
+        stack.push({ value: value[i], depth: depth + 1 });
+      }
+      continue;
+    }
     const proto: unknown = Object.getPrototypeOf(value);
-    ok =
-      (proto === Object.prototype || proto === null) &&
-      Object.getOwnPropertySymbols(value).length === 0 &&
-      Object.values(value).every((item) => isJsonData(item, path));
+    if (proto !== Object.prototype && proto !== null) return false;
+    if (Object.getOwnPropertySymbols(value).length > 0) return false;
+    const keys = Object.keys(value);
+    if (visited + keys.length > ANNOTATIONS_MAX_VALUES) return false;
+    for (const key of keys) stack.push({ value: (value as Record<string, unknown>)[key], depth: depth + 1 });
   }
-  path.delete(value);
-  return ok;
+  return true;
 }
 
 // The listed row's annotations as the guarded call carries them: an absent
@@ -417,8 +437,13 @@ function isJsonData(value: unknown, path: Set<object> = new Set()): boolean {
 // of JSON data gives null and the call is refused.
 function guardAnnotations(raw: unknown): Record<string, unknown> | null {
   if (raw === undefined || raw === null) return {};
-  if (typeof raw !== "object" || Array.isArray(raw) || !isJsonData(raw)) return null;
-  return raw as Record<string, unknown>;
+  if (typeof raw !== "object" || Array.isArray(raw)) return null;
+  try {
+    // A property getter could throw while the walk reads it; that is not data.
+    return isJsonData(raw) ? (raw as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
 }
 
 // The read tool's call, through the host's GUARDED method only. It sends the
