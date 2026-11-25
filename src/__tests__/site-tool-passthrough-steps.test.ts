@@ -132,7 +132,7 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
       const args = {
         post_id: 42,
         if_unmodified_since: "2026-11-25 10:00:00",
-        expected: { title: "T", content: "<p>a</p>", excerpt: "", status: "draft" },
+        expected: { title: "T", content: "<p>a</p>", excerpt: "", status: "draft", row_token: "a".repeat(64) },
         content: "<p>b</p>",
       };
       await write({ toolName: "cinatra/post-update-if-unchanged", argsJson: JSON.stringify(args), instanceId: "wp-1" });
@@ -142,6 +142,26 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
         args,
         instanceId: "wp-1",
       });
+    });
+
+    it("the write tool forwards the plugin's row_token unchanged and returns its refusal results as they are", async () => {
+      // The connector does not check this ability's arguments or results: the
+      // plugin refuses a missing or malformed expected.row_token itself.
+      const policyConflict = {
+        success: false,
+        code: "site_policy_conflict",
+        message: "A site filter wanted to change a column this save does not write.",
+        data: { changed: ["post_name"] },
+      };
+      invokeSiteToolMock.mockResolvedValueOnce(policyConflict);
+      const token = "0123456789abcdef".repeat(4);
+      const argsJson =
+        '{"post_id":7,"if_unmodified_since":"2026-11-25 10:00:00","content":"<p>b</p>",' +
+        `"expected":{"title":"T","content":"<p>a</p>","excerpt":"","status":"publish","row_token":"${token}"}}`;
+      const result = await write({ toolName: "cinatra/post-update-if-unchanged", argsJson, instanceId: "wp-1" });
+      const forwarded = invokeSiteToolMock.mock.calls[0]![0] as { args: { expected: Record<string, unknown> } };
+      expect(forwarded.args.expected.row_token).toBe(token);
+      expect(result).toEqual(policyConflict);
     });
 
     it("the post update argument checks also apply to arguments given as JSON text", async () => {
