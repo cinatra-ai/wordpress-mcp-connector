@@ -1,0 +1,232 @@
+// cinatra#3745 (owner decision 1234 A): a flow step reads the page and writes
+// the reviewed change without a model. The host serves a connector tool to such
+// a step when the tool's registration declares `passthroughStep`:
+//   - `wordpress_site_tool_call` declares "read" (served to a verified step
+//     without a person's decision, so it must never reach a writing ability);
+//   - `wordpress_site_tool_write` declares "publishing" (served only to a
+//     publishing step whose card a person released) and keeps `outward: {}`.
+// A flow template renders its arguments as text, so both tools also take the
+// ability's arguments as JSON text (`argsJson`).
+import { describe, expect, it, vi, beforeEach } from "vitest";
+import type { SiteToolRow, SiteToolsListPage } from "@cinatra-ai/sdk-extensions";
+
+import {
+  createWordPressPrimitiveHandlers,
+  SITE_TOOL_ARGS_BOTH_REFUSAL,
+  SITE_TOOL_ARGS_JSON_MAX_BYTES,
+  SITE_TOOL_ARGS_JSON_REFUSAL,
+  SITE_TOOL_ARGS_JSON_TOO_LARGE_REFUSAL,
+  SITE_TOOL_READ_ONLY_REFUSAL,
+} from "@cinatra-ai/wordpress-mcp-connector/mcp-handlers";
+import { registerWordPressPrimitives } from "../mcp/registry";
+import { registerWordPressConnector, _resetWordPressDepsForTests, type WordPressConnectorDeps } from "../deps";
+
+const invokeSiteToolMock = vi.fn(async (_input: unknown): Promise<unknown> => ({ ok: true }));
+const listSiteToolsMock = vi.fn(
+  async (_input: unknown): Promise<SiteToolsListPage> => ({ tools: [], catalogRevision: "rev-1" }),
+);
+
+function row(name: string, derivedClass: SiteToolRow["derivedClass"], rawAnnotations: Record<string, unknown> = {}): SiteToolRow {
+  return {
+    name,
+    serverId: "srv-1",
+    inputSchema: {},
+    rawAnnotations,
+    derivedClass,
+    policyStatus: "allowed",
+    cacheAgeMs: 0,
+    catalogRevision: "rev-1",
+  };
+}
+
+function registeredConfigs(): Map<string, Record<string, unknown>> {
+  const configs = new Map<string, Record<string, unknown>>();
+  const server = {
+    registerTool: (name: string, config: Record<string, unknown>) => {
+      configs.set(name, config);
+    },
+  } as unknown as Parameters<typeof registerWordPressPrimitives>[0];
+  registerWordPressPrimitives(server);
+  return configs;
+}
+
+describe("passthrough step declarations and JSON text arguments (cinatra#3745)", () => {
+  let handlers: ReturnType<typeof createWordPressPrimitiveHandlers>;
+  beforeEach(() => {
+    _resetWordPressDepsForTests();
+    invokeSiteToolMock.mockReset().mockResolvedValue({ ok: true });
+    listSiteToolsMock.mockReset().mockResolvedValue({ tools: [], catalogRevision: "rev-1" });
+    registerWordPressConnector({
+      invokeSiteTool: invokeSiteToolMock,
+      listSiteTools: listSiteToolsMock,
+      listMcpInstances: () => [
+        { id: "wp-1", siteUrl: "https://example.com", username: "u", applicationPassword: "p", name: "Site 1", createdAt: "", updatedAt: "" },
+      ],
+    } as unknown as WordPressConnectorDeps);
+    handlers = createWordPressPrimitiveHandlers();
+  });
+
+  const call = (tool: "wordpress_site_tool_call" | "wordpress_site_tool_write", input: unknown) =>
+    (handlers as any)[tool]({
+      primitiveName: tool,
+      input,
+      actor: { actorType: "model", source: "agent" },
+      mode: "agentic",
+    });
+  const read = (input: unknown) => call("wordpress_site_tool_call", input);
+  const write = (input: unknown) => call("wordpress_site_tool_write", input);
+
+  describe("registry declarations", () => {
+    it("declares passthroughStep \"read\" on the read tool and nothing outward on it", () => {
+      const config = registeredConfigs().get("wordpress_site_tool_call")!;
+      expect(config.passthroughStep).toBe("read");
+      expect("outward" in config).toBe(false);
+    });
+
+    it("declares passthroughStep \"publishing\" on the write tool and keeps outward: {}", () => {
+      const config = registeredConfigs().get("wordpress_site_tool_write")!;
+      expect(config.passthroughStep).toBe("publishing");
+      expect(config.outward).toEqual({});
+    });
+
+    it("declares passthroughStep on exactly these two tools", () => {
+      const declared = [...registeredConfigs()]
+        .filter(([, config]) => "passthroughStep" in config)
+        .map(([name, config]) => [name, config.passthroughStep]);
+      expect(declared.sort()).toEqual([
+        ["wordpress_site_tool_call", "read"],
+        ["wordpress_site_tool_write", "publishing"],
+      ]);
+    });
+
+    it("never declares \"read\" on a registration that declares outward", () => {
+      for (const [, config] of registeredConfigs()) {
+        if ("outward" in config) expect(config.passthroughStep).not.toBe("read");
+      }
+    });
+  });
+
+  describe("argsJson", () => {
+    it("the read tool accepts the arguments as JSON text and forwards the parsed object", async () => {
+      listSiteToolsMock.mockResolvedValueOnce({
+        tools: [row("cinatra/post-read", "read", { readonly: true, destructive: false })],
+        catalogRevision: "rev-1",
+      });
+      await read({ toolName: "cinatra/post-read", argsJson: '{"post_id":42}', instanceId: "wp-1" });
+      expect(invokeSiteToolMock).toHaveBeenCalledWith({
+        toolName: "cinatra/post-read",
+        args: { post_id: 42 },
+        instanceId: "wp-1",
+      });
+    });
+
+    it("the write tool accepts the arguments as JSON text and forwards the parsed object", async () => {
+      const args = {
+        post_id: 42,
+        if_unmodified_since: "2026-11-25 10:00:00",
+        expected: { title: "T", content: "<p>a</p>", excerpt: "", status: "draft" },
+        content: "<p>b</p>",
+      };
+      await write({ toolName: "cinatra/post-update-if-unchanged", argsJson: JSON.stringify(args), instanceId: "wp-1" });
+      expect(listSiteToolsMock).not.toHaveBeenCalled();
+      expect(invokeSiteToolMock).toHaveBeenCalledWith({
+        toolName: "cinatra/post-update-if-unchanged",
+        args,
+        instanceId: "wp-1",
+      });
+    });
+
+    it("the post update argument checks also apply to arguments given as JSON text", async () => {
+      await expect(
+        write({ toolName: "ewpa/update-post", argsJson: '{"post_id":1,"slug":"x"}', instanceId: "wp-1" }),
+      ).rejects.toThrow(/outside the content-review scope/);
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
+    });
+
+    it.each(["wordpress_site_tool_call", "wordpress_site_tool_write"] as const)(
+      "%s refuses args and argsJson together",
+      async (tool) => {
+        await expect(
+          call(tool, { toolName: "core/get-site-info", args: {}, argsJson: "{}", instanceId: "wp-1" }),
+        ).rejects.toThrow(SITE_TOOL_ARGS_BOTH_REFUSAL);
+        expect(invokeSiteToolMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      ["text that is not JSON", '{"post_id": 42, secret-value'],
+      ["a JSON array", "[1,2]"],
+      ["a JSON string", '"secret-value"'],
+      ["JSON null", "null"],
+      ["a JSON number", "42"],
+    ])("refuses %s with the fixed message that never echoes the text", async (_label, argsJson) => {
+      for (const tool of ["wordpress_site_tool_call", "wordpress_site_tool_write"] as const) {
+        const error = await call(tool, { toolName: "core/get-site-info", argsJson, instanceId: "wp-1" }).catch(
+          (e: unknown) => e,
+        );
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toBe(SITE_TOOL_ARGS_JSON_REFUSAL);
+        expect((error as Error).message).not.toContain("secret-value");
+      }
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
+    });
+
+    it("bounds the JSON text at 256 KiB, counted in UTF-8 bytes", async () => {
+      expect(SITE_TOOL_ARGS_JSON_MAX_BYTES).toBe(262_144);
+      const pad = (bytes: number) => `{"content":"${"a".repeat(bytes - 14)}"}`;
+      expect(new TextEncoder().encode(pad(SITE_TOOL_ARGS_JSON_MAX_BYTES)).length).toBe(SITE_TOOL_ARGS_JSON_MAX_BYTES);
+
+      await write({ toolName: "x/save", argsJson: pad(SITE_TOOL_ARGS_JSON_MAX_BYTES), instanceId: "wp-1" });
+      expect(invokeSiteToolMock).toHaveBeenCalledTimes(1);
+
+      await expect(
+        write({ toolName: "x/save", argsJson: pad(SITE_TOOL_ARGS_JSON_MAX_BYTES + 1), instanceId: "wp-1" }),
+      ).rejects.toThrow(SITE_TOOL_ARGS_JSON_TOO_LARGE_REFUSAL);
+      // Multi-byte characters count by their UTF-8 length, not by string length.
+      const multiByte = `{"content":"${"é".repeat(SITE_TOOL_ARGS_JSON_MAX_BYTES / 2)}"}`;
+      expect(multiByte.length).toBeLessThan(SITE_TOOL_ARGS_JSON_MAX_BYTES);
+      await expect(write({ toolName: "x/save", argsJson: multiByte, instanceId: "wp-1" })).rejects.toThrow(
+        SITE_TOOL_ARGS_JSON_TOO_LARGE_REFUSAL,
+      );
+      expect(invokeSiteToolMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("the object form is unchanged: omitted args still forward as {}", async () => {
+      await write({ toolName: "x/ping", instanceId: "wp-1" });
+      expect(invokeSiteToolMock).toHaveBeenCalledWith({ toolName: "x/ping", args: {}, instanceId: "wp-1" });
+    });
+
+    it("never forwards argsJson itself to the invoker", async () => {
+      await write({ toolName: "x/save", argsJson: '{"a":1}', instanceId: "wp-1" });
+      const forwarded = invokeSiteToolMock.mock.calls[0]![0] as Record<string, unknown>;
+      expect("argsJson" in forwarded).toBe(false);
+    });
+  });
+
+  describe("the read tool never reaches a writing ability", () => {
+    it("refuses the plugin's guarded update ability, which the catalog marks destructive", async () => {
+      listSiteToolsMock.mockResolvedValueOnce({
+        tools: [row("cinatra/post-update-if-unchanged", "destructive", { readonly: false, destructive: true })],
+        catalogRevision: "rev-1",
+      });
+      await expect(
+        read({ toolName: "cinatra/post-update-if-unchanged", argsJson: '{"post_id":1}', instanceId: "wp-1" }),
+      ).rejects.toThrow(SITE_TOOL_READ_ONLY_REFUSAL);
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
+    });
+
+    it("refuses an ability without the read-only annotation (the host lists it as write)", async () => {
+      listSiteToolsMock.mockResolvedValueOnce({ tools: [row("x/unannotated", "write")], catalogRevision: "rev-1" });
+      await expect(read({ toolName: "x/unannotated", argsJson: "{}", instanceId: "wp-1" })).rejects.toThrow(
+        SITE_TOOL_READ_ONLY_REFUSAL,
+      );
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
+    });
+
+    it("refuses when the catalog cannot be read", async () => {
+      listSiteToolsMock.mockRejectedValueOnce(new Error("catalog unavailable"));
+      await expect(read({ toolName: "x/note-get", argsJson: "{}", instanceId: "wp-1" })).rejects.toThrow();
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
+    });
+  });
+});

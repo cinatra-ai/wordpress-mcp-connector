@@ -56,6 +56,22 @@ const TOOL_META: Record<string, { description: string; inputSchema: z.ZodTypeAny
 const OUTWARD_TOOL_NAMES = new Set(["wordpress_site_tool_write"]);
 const OUTWARD = { outward: {} };
 
+// cinatra#3745 (owner decision 1234 A): a flow step reads the page and writes
+// the reviewed change without a model. The host serves a connector tool to such
+// a step only when its registration declares `passthroughStep`:
+//   - "read": served to a verified step whose tool list names the tool, with no
+//     person's decision; the host allows it only on a registration with no
+//     `outward`. The read tool refuses every ability the site's catalog does not
+//     list as read (`isReadAbility` in ./handlers), so this road cannot write.
+//   - "publishing": served only to a declared publishing step whose card a
+//     person released, consumed once per released decision.
+// Spread from a constant, like `outward`, so an SDK config type without the
+// field accepts it. A host that does not read the field ignores it.
+const PASSTHROUGH_STEPS: Record<string, { passthroughStep: "read" | "publishing" }> = {
+  wordpress_site_tool_call: { passthroughStep: "read" },
+  wordpress_site_tool_write: { passthroughStep: "publishing" },
+};
+
 export function registerWordPressPrimitives(server: ExtensionMcpToolServer) {
   const handlers = createWordPressPrimitiveHandlers();
 
@@ -78,6 +94,7 @@ export function registerWordPressPrimitives(server: ExtensionMcpToolServer) {
         description: meta.description,
         inputSchema: meta.inputSchema,
         ...(OUTWARD_TOOL_NAMES.has(name) ? OUTWARD : {}),
+        ...(PASSTHROUGH_STEPS[name] ?? {}),
       },
       async (input): Promise<ExtensionMcpToolResult> => {
         const result = await handler({

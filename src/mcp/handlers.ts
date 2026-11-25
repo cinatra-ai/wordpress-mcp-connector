@@ -77,11 +77,20 @@ export const siteToolCallSchema = z.object({
       "The site tool / ability to call. On the default aggregator server this is the inner ability id, which may contain a slash (e.g. \"core/get-site-info\").",
     ),
   // Forwarded to the resolved tool's advertised schema UNMODIFIED (§3.7).
-  // Defaults to {} so a no-argument tool is callable without an explicit args.
+  // Absent args (and absent argsJson) forward as {}, so a no-argument tool is
+  // callable without an explicit args.
   args: z
     .record(z.string(), z.unknown())
-    .default({})
+    .optional()
     .describe("Arguments for the target tool, matching its advertised input schema. Omit or pass {} for a no-argument tool."),
+  // cinatra#3745: a flow step without a model renders its arguments as text,
+  // so the same arguments may arrive as the text of a JSON object instead.
+  argsJson: z
+    .string()
+    .optional()
+    .describe(
+      "The same arguments as the text of a JSON object, for a caller that can send only text. Give args or argsJson, not both.",
+    ),
   instanceId: z
     .string()
     .min(1)
@@ -223,10 +232,53 @@ const KNOWN_READ_ABILITIES: ReadonlySet<string> = new Set([
   "ewpa/get-page",
   "ewpa/get-categories",
 ]);
+// cinatra#3745: `argsJson` carries the ability's arguments as the text of a
+// JSON object. Exactly one of `args` and `argsJson` may be given. The text is
+// bounded at 256 KiB counted in UTF-8 bytes (the host's limit for one action),
+// must parse to a plain object, and is then checked by the same `args` schema.
+// The refusals are fixed messages and never repeat the text.
+export const SITE_TOOL_ARGS_JSON_MAX_BYTES = 256 * 1024;
+export const SITE_TOOL_ARGS_BOTH_REFUSAL = "Give the tool arguments as args or as argsJson, not both.";
+export const SITE_TOOL_ARGS_JSON_REFUSAL = "argsJson must be the text of a JSON object.";
+export const SITE_TOOL_ARGS_JSON_TOO_LARGE_REFUSAL =
+  `argsJson is larger than ${SITE_TOOL_ARGS_JSON_MAX_BYTES} bytes.`;
+
+type SiteToolCallInput = {
+  toolName: string;
+  args: Record<string, unknown>;
+  instanceId?: string;
+  serverId?: string;
+};
+
+function parseArgsJson(text: string): Record<string, unknown> {
+  // A string has at least as many UTF-8 bytes as UTF-16 code units, so a long
+  // string is refused before it is encoded.
+  if (text.length > SITE_TOOL_ARGS_JSON_MAX_BYTES || new TextEncoder().encode(text).length > SITE_TOOL_ARGS_JSON_MAX_BYTES) {
+    throw new Error(SITE_TOOL_ARGS_JSON_TOO_LARGE_REFUSAL);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(SITE_TOOL_ARGS_JSON_REFUSAL);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(SITE_TOOL_ARGS_JSON_REFUSAL);
+  }
+  const checked = siteToolCallSchema.shape.args.safeParse(parsed);
+  if (!checked.success || checked.data === undefined) throw new Error(SITE_TOOL_ARGS_JSON_REFUSAL);
+  return checked.data;
+}
+
+/** Parse a site tool input; `args` is resolved from `args` or `argsJson`. */
+function parseSiteToolCallInput(raw: unknown): SiteToolCallInput {
+  const { argsJson, args, ...rest } = siteToolCallSchema.parse(raw);
+  if (argsJson !== undefined && args !== undefined) throw new Error(SITE_TOOL_ARGS_BOTH_REFUSAL);
+  return { ...rest, args: argsJson !== undefined ? parseArgsJson(argsJson) : (args ?? {}) };
+}
+
 const KNOWN_WRITE_ABILITIES: ReadonlySet<string> = new Set([...CONTENT_REVIEW_TARGET_ABILITIES, "ewpa/create-post"]);
 const MAX_CATALOG_PAGES = 20;
-
-type SiteToolCallInput = z.infer<typeof siteToolCallSchema>;
 
 async function isReadAbility(input: SiteToolCallInput): Promise<boolean> {
   if (KNOWN_WRITE_ABILITIES.has(input.toolName)) return false;
@@ -291,14 +343,14 @@ export function createWordPressPrimitiveHandlers() {
     // from the MCP request frame (§2.4) — the synthetic request.actor literal is
     // never read here for any decision.
     "wordpress_site_tool_call": async (request: ExtensionPrimitiveRequest<unknown>) => {
-      const input = siteToolCallSchema.parse(request.input);
+      const input = parseSiteToolCallInput(request.input);
       if (!(await isReadAbility(input))) throw new Error(SITE_TOOL_READ_ONLY_REFUSAL);
       return forwardSiteTool(input, "wordpress_site_tool_call");
     },
 
     // cinatra#3745: every write and publish of a site ability; declared outward.
     "wordpress_site_tool_write": async (request: ExtensionPrimitiveRequest<unknown>) =>
-      forwardSiteTool(siteToolCallSchema.parse(request.input), "wordpress_site_tool_write"),
+      forwardSiteTool(parseSiteToolCallInput(request.input), "wordpress_site_tool_write"),
 
     "wordpress_site_tools_list": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const input = siteToolsListSchema.parse(request.input);
