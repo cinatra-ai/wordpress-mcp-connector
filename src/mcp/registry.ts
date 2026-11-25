@@ -62,8 +62,12 @@ const OUTWARD = { outward: {} };
 //   - "read": served to a verified step whose tool list names the tool, with no
 //     person's decision; the host allows it only on a registration with no
 //     `outward`. The read tool serves only a known read whose catalog row, on the
-//     server that runs it, says read-only (`readRowServerId` in ./handlers),
-//     so this road cannot write.
+//     server that runs it, says read-only (`readRow` in ./handlers), and sends
+//     that row's annotations as `expectedRawAnnotations`. The check is not
+//     atomic with the call: the read class at execution must be enforced by
+//     the host. A host that serves "read" steps must refuse, in the same
+//     resolution that executes the call, an entry that is not read-class or
+//     whose annotations differ from `expectedRawAnnotations`.
 //   - "publishing": served only to a declared publishing step whose card a
 //     person released, consumed once per released decision.
 // Spread from a constant, like `outward`, so an SDK config type without the

@@ -214,7 +214,7 @@ async function callReviewGatedSiteTool(
 // agent runs and flow steps read through this proxy, so writes and publishes go
 // through `wordpress_site_tool_write` (declared outward in the registry)
 // instead. The read exemption is decided on the catalog row of the server that
-// will run the call, never on the ability name alone (`readRowServerId`
+// will run the call, never on the ability name alone (`readRow`
 // below); every refusal is this fixed message, given before the invoker.
 export const SITE_TOOL_READ_ONLY_REFUSAL =
   "wordpress_site_tool_call is read-only: it calls only a read ability of the site's catalog. " +
@@ -249,6 +249,9 @@ type SiteToolCallInput = {
   args: Record<string, unknown>;
   instanceId?: string;
   serverId?: string;
+  // Read tool only: the annotations of the catalog row the read check passed
+  // (see `readRow`). Not part of the SDK call input yet; today's host ignores it.
+  expectedRawAnnotations?: Record<string, unknown>;
 };
 
 function parseArgsJson(text: string): Record<string, unknown> {
@@ -302,19 +305,23 @@ function rowSaysRead(row: SiteToolRow): boolean {
   );
 }
 
-// The server id of the one catalog row that may serve this call as a read, or
-// null. The ability must be a known read AND its row on the server that will
+// The one catalog row that may serve this call as a read, or null. The ability must be a known read AND its row on the server that will
 // run it must say read-only (`rowSaysRead`). The row is identified by
 // `{serverId, name}`: with a `serverId`, the only row of the name must be on
 // that server; without one, the name must have exactly one row in the whole
 // catalog. A missing row, a row of another server, several rows, an unbound
 // listing or a listing that does not end within MAX_CATALOG_PAGES pages give
-// null; a listing that throws passes its error on. The caller pins the call to
-// the returned server id. The catalog is read at call time; the host resolves
-// the call against its own catalog snapshot, so a snapshot refreshed between
-// this listing and the call runs the refreshed entry, which still passes the
-// host's own destructive check.
-async function readRowServerId(input: SiteToolCallInput): Promise<string | null> {
+// null; a listing that throws passes its error on. The catalog is read on
+// every call, and the call follows the listing with no other wait.
+//
+// This check is not atomic with the call: the host resolves the call against
+// its own catalog snapshot, which can refresh after this listing, and today it
+// checks only the destructive class at execution (an ordinary write runs). The
+// caller therefore pins the call to the row's `serverId` and sends the row's
+// annotations as `expectedRawAnnotations`. Today's host copies only the fields
+// it knows and ignores this one; the host must refuse an entry whose
+// annotations differ from it, in the same resolution that executes the call.
+async function readRow(input: SiteToolCallInput): Promise<SiteToolRow | null> {
   if (KNOWN_WRITE_ABILITIES.has(input.toolName)) return null;
   if (!KNOWN_READ_ABILITIES.has(input.toolName)) return null;
   const list = getWordPressDeps().listSiteTools;
@@ -333,7 +340,7 @@ async function readRowServerId(input: SiteToolCallInput): Promise<string | null>
       if (rows.length !== 1) return null;
       const [only] = rows as [SiteToolRow];
       if (input.serverId !== undefined && only.serverId !== input.serverId) return null;
-      return rowSaysRead(only) ? only.serverId : null;
+      return rowSaysRead(only) ? only : null;
     }
   }
   return null;
@@ -366,6 +373,7 @@ async function forwardSiteTool(input: SiteToolCallInput, tool: string): Promise<
     args: input.args,
     ...(input.instanceId !== undefined ? { instanceId: input.instanceId } : {}),
     ...(input.serverId !== undefined ? { serverId: input.serverId } : {}),
+    ...(input.expectedRawAnnotations !== undefined ? { expectedRawAnnotations: input.expectedRawAnnotations } : {}),
   });
 }
 
@@ -379,9 +387,12 @@ export function createWordPressPrimitiveHandlers() {
     // never read here for any decision.
     "wordpress_site_tool_call": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const input = parseSiteToolCallInput(request.input);
-      const serverId = await readRowServerId(input);
-      if (serverId === null) throw new Error(SITE_TOOL_READ_ONLY_REFUSAL);
-      return forwardSiteTool({ ...input, serverId }, "wordpress_site_tool_call");
+      const row = await readRow(input);
+      if (row === null) throw new Error(SITE_TOOL_READ_ONLY_REFUSAL);
+      return forwardSiteTool(
+        { ...input, serverId: row.serverId, expectedRawAnnotations: row.rawAnnotations },
+        "wordpress_site_tool_call",
+      );
     },
 
     // cinatra#3745: every write and publish of a site ability; declared outward.

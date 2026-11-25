@@ -107,6 +107,7 @@ describe("the site tools split into a read proxy and an outward write tool (cina
       args: { post_id: 42 },
       instanceId: "wp-1",
       serverId: "mcp-adapter-default",
+      expectedRawAnnotations: {},
     });
   });
 
@@ -121,6 +122,7 @@ describe("the site tools split into a read proxy and an outward write tool (cina
       args: {},
       instanceId: "wp-1",
       serverId: "srv-1",
+      expectedRawAnnotations: { readOnlyHint: true },
     });
   });
 

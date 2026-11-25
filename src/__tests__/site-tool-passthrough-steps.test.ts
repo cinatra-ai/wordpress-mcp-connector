@@ -125,6 +125,7 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
         args: { post_id: 42 },
         instanceId: "wp-1",
         serverId: "srv-1",
+        expectedRawAnnotations: { readonly: true, destructive: false },
       });
     });
 
@@ -320,6 +321,7 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
         args: { post_id: 42 },
         instanceId: "wp-1",
         serverId: DEFAULT_SERVER,
+        expectedRawAnnotations: readOnly,
       });
     });
 
@@ -331,6 +333,7 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
         args: { post_id: 42 },
         instanceId: "wp-1",
         serverId: DEFAULT_SERVER,
+        expectedRawAnnotations: {},
       });
       invokeSiteToolMock.mockClear();
       listSiteToolsMock.mockResolvedValueOnce({ tools: [row("ewpa/get-post", "write", {}, "wps-other")], catalogRevision: "rev-1" });
@@ -338,6 +341,66 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
         SITE_TOOL_READ_ONLY_REFUSAL,
       );
       expect(invokeSiteToolMock).not.toHaveBeenCalled();
+    });
+
+    it("sends the annotations of the row it validated with the call, as the expectation the host can check", async () => {
+      const annotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true };
+      listSiteToolsMock.mockResolvedValueOnce({
+        tools: [row("cinatra/post-read", "read", annotations, DEFAULT_SERVER)],
+        catalogRevision: "rev-1",
+      });
+      await read({ toolName: "cinatra/post-read", args: { post_id: 3 }, instanceId: "wp-1" });
+      expect(invokeSiteToolMock).toHaveBeenCalledWith({
+        toolName: "cinatra/post-read",
+        args: { post_id: 3 },
+        instanceId: "wp-1",
+        serverId: DEFAULT_SERVER,
+        expectedRawAnnotations: annotations,
+      });
+    });
+
+    it("reads the catalog again on every call: a row that turned into a write is refused on the next call", async () => {
+      listSiteToolsMock
+        .mockResolvedValueOnce({ tools: [row("cinatra/post-read", "read", readOnly, DEFAULT_SERVER)], catalogRevision: "rev-1" })
+        .mockResolvedValueOnce({
+          tools: [row("cinatra/post-read", "write", { readOnlyHint: false }, DEFAULT_SERVER)],
+          catalogRevision: "rev-2",
+        });
+      await read({ toolName: "cinatra/post-read", args: { post_id: 3 }, instanceId: "wp-1" });
+      await expect(read({ toolName: "cinatra/post-read", args: { post_id: 3 }, instanceId: "wp-1" })).rejects.toThrow(
+        SITE_TOOL_READ_ONLY_REFUSAL,
+      );
+      expect(listSiteToolsMock).toHaveBeenCalledTimes(2);
+      expect(invokeSiteToolMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("a row that changes between the listing and the call is caught by a host that checks the expectation", async () => {
+      // The live entry the host would execute; it turns into an ordinary write
+      // right after the connector's listing. The invoker below stands in for a
+      // host that compares the entry it executes with expectedRawAnnotations.
+      const live: { rawAnnotations: Record<string, unknown> } = { rawAnnotations: { readOnlyHint: true } };
+      const executed: unknown[] = [];
+      listSiteToolsMock.mockImplementationOnce(async () => {
+        const page = {
+          tools: [row("cinatra/post-read", "read", { ...live.rawAnnotations }, DEFAULT_SERVER)],
+          catalogRevision: "rev-1",
+        };
+        live.rawAnnotations = { readOnlyHint: false };
+        return page;
+      });
+      invokeSiteToolMock.mockImplementationOnce(async (input: unknown) => {
+        const { expectedRawAnnotations } = input as { expectedRawAnnotations?: unknown };
+        // Like today's host, a call that carries no expectation is executed.
+        if (expectedRawAnnotations !== undefined && JSON.stringify(expectedRawAnnotations) !== JSON.stringify(live.rawAnnotations)) {
+          throw new Error("catalog_entry_changed");
+        }
+        executed.push(input);
+        return { ok: true };
+      });
+      await expect(read({ toolName: "cinatra/post-read", args: { post_id: 3 }, instanceId: "wp-1" })).rejects.toThrow(
+        "catalog_entry_changed",
+      );
+      expect(executed).toEqual([]);
     });
 
     it("the publishing tool is unchanged: it lists no catalog and adds no server", async () => {
