@@ -56,6 +56,23 @@ const TOOL_META: Record<string, { description: string; inputSchema: z.ZodTypeAny
 const OUTWARD_TOOL_NAMES = new Set(["wordpress_site_tool_write"]);
 const OUTWARD = { outward: {} };
 
+// cinatra#3745 (owner decision 1234 A): a flow step reads the page and writes
+// the reviewed change without a model. The host serves a connector tool to such
+// a step only when its registration declares `passthroughStep`:
+//   - "publishing": served only to a declared publishing step whose card a
+//     person released, consumed once per released decision.
+//   - "read" (served with no person's decision) is NOT declared on the read
+//     tool yet. Its catalog check is not atomic with the call, and today's host
+//     checks only the destructive class at execution, so a row that turned
+//     into an ordinary write would run. The declaration is added only after the
+//     host refuses, in the same resolution that executes the call, an entry
+//     that is not read-class (see AGENTS.md).
+// Spread from a constant, like `outward`, so an SDK config type without the
+// field accepts it. A host that does not read the field ignores it.
+const PASSTHROUGH_STEPS: Record<string, { passthroughStep: "publishing" }> = {
+  wordpress_site_tool_write: { passthroughStep: "publishing" },
+};
+
 export function registerWordPressPrimitives(server: ExtensionMcpToolServer) {
   const handlers = createWordPressPrimitiveHandlers();
 
@@ -78,6 +95,7 @@ export function registerWordPressPrimitives(server: ExtensionMcpToolServer) {
         description: meta.description,
         inputSchema: meta.inputSchema,
         ...(OUTWARD_TOOL_NAMES.has(name) ? OUTWARD : {}),
+        ...(PASSTHROUGH_STEPS[name] ?? {}),
       },
       async (input): Promise<ExtensionMcpToolResult> => {
         const result = await handler({

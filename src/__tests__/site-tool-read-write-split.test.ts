@@ -3,8 +3,9 @@
 // run for the person's recorded decision. The declaration is per registration,
 // not per call, so the site's catalog is split in two:
 //   - `wordpress_site_tool_call` is READ-ONLY. It forwards an ability only when
-//     it is a known read or the catalog lists it with derivedClass "read"; every
-//     other ability is refused with one fixed message, before the invoker.
+//     it is a known read AND its one catalog row, on the server that will run
+//     it, says read-only; every other ability is refused with one fixed
+//     message, before the invoker.
 //   - `wordpress_site_tool_write` forwards any ability and declares `outward: {}`
 //     (its inputs carry no stored item with a revision, so no subject).
 import { describe, expect, it, vi, beforeEach } from "vitest";
@@ -27,7 +28,7 @@ function row(name: string, derivedClass: SiteToolRow["derivedClass"], serverId =
     name,
     serverId,
     inputSchema: {},
-    rawAnnotations: {},
+    rawAnnotations: derivedClass === "read" ? { readOnlyHint: true } : {},
     derivedClass,
     policyStatus: "allowed",
     cacheAgeMs: 0,
@@ -97,25 +98,45 @@ describe("the site tools split into a read proxy and an outward write tool (cina
     expect(declared).toEqual(["wordpress_site_tool_write"]);
   });
 
-  it("the read proxy forwards a known read ability without listing the catalog", async () => {
+  it("the read proxy forwards a known read ability after reading its catalog row, pinned to that server", async () => {
+    listSiteToolsMock.mockResolvedValueOnce(catalogPage([row("ewpa/get-post", "write", "mcp-adapter-default")]));
     await read({ toolName: "ewpa/get-post", args: { post_id: 42 }, instanceId: "wp-1" });
-    expect(listSiteToolsMock).not.toHaveBeenCalled();
-    expect(invokeSiteToolMock).toHaveBeenCalledWith({ toolName: "ewpa/get-post", args: { post_id: 42 }, instanceId: "wp-1" });
+    expect(listSiteToolsMock).toHaveBeenCalledWith({ instanceId: "wp-1" });
+    expect(invokeSiteToolMock).toHaveBeenCalledWith({
+      toolName: "ewpa/get-post",
+      args: { post_id: 42 },
+      instanceId: "wp-1",
+      serverId: "mcp-adapter-default",
+      expectedRawAnnotations: {},
+    });
   });
 
-  it("the read proxy forwards an ability the catalog lists as read, paging to find it", async () => {
+  it("the read proxy forwards a known read the catalog lists as read, paging to find it", async () => {
     listSiteToolsMock
       .mockResolvedValueOnce({ tools: [row("x/other", "write")], nextCursor: "c-2", catalogRevision: "rev-1" })
-      .mockResolvedValueOnce({ tools: [row("x/note-get", "read")], catalogRevision: "rev-1" });
-    await read({ toolName: "x/note-get", instanceId: "wp-1" });
+      .mockResolvedValueOnce({ tools: [row("core/get-site-info", "read")], catalogRevision: "rev-1" });
+    await read({ toolName: "core/get-site-info", instanceId: "wp-1" });
     expect(listSiteToolsMock).toHaveBeenNthCalledWith(2, { instanceId: "wp-1", cursor: "c-2" });
-    expect(invokeSiteToolMock).toHaveBeenCalledWith({ toolName: "x/note-get", args: {}, instanceId: "wp-1" });
+    expect(invokeSiteToolMock).toHaveBeenCalledWith({
+      toolName: "core/get-site-info",
+      args: {},
+      instanceId: "wp-1",
+      serverId: "srv-1",
+      expectedRawAnnotations: { readOnlyHint: true },
+    });
   });
 
   it.each([
     ["a write row", [row("x/note-set", "write")], "x/note-set"],
     ["a destructive row", [row("x/note-delete", "destructive")], "x/note-delete"],
-    ["a name read on one server and write on another", [row("x/dual", "read"), row("x/dual", "write", "srv-2")], "x/dual"],
+    ["a known read with a write row", [row("core/get-site-info", "write")], "core/get-site-info"],
+    ["a known read with a destructive row", [row("core/get-site-info", "destructive")], "core/get-site-info"],
+    [
+      "a name read on one server and write on another",
+      [row("core/get-site-info", "read"), row("core/get-site-info", "write", "srv-2")],
+      "core/get-site-info",
+    ],
+    ["a known read missing from the catalog", [], "core/get-site-info"],
     ["an ability missing from the catalog", [], "x/unknown"],
   ])("the read proxy refuses %s with the fixed refusal and never calls the invoker", async (_label, tools, toolName) => {
     listSiteToolsMock.mockResolvedValueOnce({ tools, catalogRevision: "rev-1" });
@@ -134,14 +155,14 @@ describe("the site tools split into a read proxy and an outward write tool (cina
   });
 
   it("the read proxy refuses when the catalog listing is unbound or never ends", async () => {
-    listSiteToolsMock.mockResolvedValue({ tools: [row("x/note-get", "read")], nextCursor: "again", catalogRevision: "rev-1" });
-    await expect(read({ toolName: "x/note-get", instanceId: "wp-1" })).rejects.toThrow(SITE_TOOL_READ_ONLY_REFUSAL);
+    listSiteToolsMock.mockResolvedValue({ tools: [row("core/get-site-info", "read")], nextCursor: "again", catalogRevision: "rev-1" });
+    await expect(read({ toolName: "core/get-site-info", instanceId: "wp-1" })).rejects.toThrow(SITE_TOOL_READ_ONLY_REFUSAL);
     _resetWordPressDepsForTests();
     registerWordPressConnector({ invokeSiteTool: invokeSiteToolMock } as unknown as WordPressConnectorDeps);
     await expect(
       (createWordPressPrimitiveHandlers() as any).wordpress_site_tool_call({
         primitiveName: "wordpress_site_tool_call",
-        input: { toolName: "x/note-get", instanceId: "wp-1" },
+        input: { toolName: "core/get-site-info", instanceId: "wp-1" },
         actor: { actorType: "model", source: "agent" },
         mode: "agentic",
       }),
@@ -151,15 +172,15 @@ describe("the site tools split into a read proxy and an outward write tool (cina
 
   it("the read proxy passes on a listing error and never calls the invoker", async () => {
     listSiteToolsMock.mockRejectedValueOnce(new Error("catalog unavailable"));
-    await expect(read({ toolName: "x/note-get", instanceId: "wp-1" })).rejects.toThrow("catalog unavailable");
+    await expect(read({ toolName: "core/get-site-info", instanceId: "wp-1" })).rejects.toThrow("catalog unavailable");
     expect(invokeSiteToolMock).not.toHaveBeenCalled();
   });
 
   it("the read proxy refuses a read row on one page followed by a write row of the same name on a later page", async () => {
     listSiteToolsMock
-      .mockResolvedValueOnce(catalogPage([row("x/dual", "read")], "c-2"))
-      .mockResolvedValueOnce(catalogPage([row("x/dual", "write", "srv-2")]));
-    await expect(read({ toolName: "x/dual", instanceId: "wp-1" })).rejects.toThrow(SITE_TOOL_READ_ONLY_REFUSAL);
+      .mockResolvedValueOnce(catalogPage([row("core/get-site-info", "read")], "c-2"))
+      .mockResolvedValueOnce(catalogPage([row("core/get-site-info", "write", "srv-2")]));
+    await expect(read({ toolName: "core/get-site-info", instanceId: "wp-1" })).rejects.toThrow(SITE_TOOL_READ_ONLY_REFUSAL);
     expect(invokeSiteToolMock).not.toHaveBeenCalled();
   });
 
@@ -167,17 +188,17 @@ describe("the site tools split into a read proxy and an outward write tool (cina
     for (let page = 1; page < 20; page++) {
       listSiteToolsMock.mockResolvedValueOnce(catalogPage([], `c-${page + 1}`));
     }
-    listSiteToolsMock.mockResolvedValueOnce(catalogPage([row("x/note-get", "read")]));
-    await read({ toolName: "x/note-get", instanceId: "wp-1" });
+    listSiteToolsMock.mockResolvedValueOnce(catalogPage([row("core/get-site-info", "read")]));
+    await read({ toolName: "core/get-site-info", instanceId: "wp-1" });
     expect(listSiteToolsMock).toHaveBeenCalledTimes(20);
     expect(invokeSiteToolMock).toHaveBeenCalledTimes(1);
   });
 
   it("the read proxy refuses when the 20th catalog page still has a next page", async () => {
     for (let page = 1; page <= 20; page++) {
-      listSiteToolsMock.mockResolvedValueOnce(catalogPage(page === 20 ? [row("x/note-get", "read")] : [], `c-${page + 1}`));
+      listSiteToolsMock.mockResolvedValueOnce(catalogPage(page === 20 ? [row("core/get-site-info", "read")] : [], `c-${page + 1}`));
     }
-    await expect(read({ toolName: "x/note-get", instanceId: "wp-1" })).rejects.toThrow(SITE_TOOL_READ_ONLY_REFUSAL);
+    await expect(read({ toolName: "core/get-site-info", instanceId: "wp-1" })).rejects.toThrow(SITE_TOOL_READ_ONLY_REFUSAL);
     expect(listSiteToolsMock).toHaveBeenCalledTimes(20);
     expect(invokeSiteToolMock).not.toHaveBeenCalled();
   });

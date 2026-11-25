@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ExtensionPrimitiveRequest } from "@cinatra-ai/sdk-extensions";
+import type { ExtensionPrimitiveRequest, SiteToolRow } from "@cinatra-ai/sdk-extensions";
 // cinatra-ai/cinatra#2022 S7 (PR-θ): the 12 old per-operation `wordpress_*`
 // facade tools that used to live here are DELETED. They are enumerated once,
 // in this repo's CHANGELOG entry for that deletion, and are deliberately NOT
@@ -77,11 +77,20 @@ export const siteToolCallSchema = z.object({
       "The site tool / ability to call. On the default aggregator server this is the inner ability id, which may contain a slash (e.g. \"core/get-site-info\").",
     ),
   // Forwarded to the resolved tool's advertised schema UNMODIFIED (§3.7).
-  // Defaults to {} so a no-argument tool is callable without an explicit args.
+  // Absent args (and absent argsJson) forward as {}, so a no-argument tool is
+  // callable without an explicit args.
   args: z
     .record(z.string(), z.unknown())
-    .default({})
+    .optional()
     .describe("Arguments for the target tool, matching its advertised input schema. Omit or pass {} for a no-argument tool."),
+  // cinatra#3745: a flow step without a model renders its arguments as text,
+  // so the same arguments may arrive as the text of a JSON object instead.
+  argsJson: z
+    .string()
+    .optional()
+    .describe(
+      "The same arguments as the text of a JSON object, for a caller that can send only text. Give args or argsJson, not both.",
+    ),
   instanceId: z
     .string()
     .min(1)
@@ -202,14 +211,11 @@ async function callReviewGatedSiteTool(
 
 // cinatra#3745: `wordpress_site_tool_call` is READ-ONLY. A registration's
 // `outward` declaration holds every call of that tool in an agent run, and
-// agent runs read through this proxy, so writes and publishes go through
-// `wordpress_site_tool_write` (declared outward in the registry) instead. The
-// proxy forwards an ability only when it is a known read below or the site's
-// catalog lists every row of that name as derivedClass "read"; anything else
-// (write, destructive, unlisted, an unbound listing, a catalog that does not
-// end) gets this fixed refusal before the invoker. The site's own ewpa
-// abilities carry no annotations (the host classifies them as write), so their
-// reads are named here.
+// agent runs read through this proxy, so writes and publishes go
+// through `wordpress_site_tool_write` (declared outward in the registry)
+// instead. The read exemption is decided on the catalog row of the server that
+// will run the call, never on the ability name alone (`readRow`
+// below); every refusal is this fixed message, given before the invoker.
 export const SITE_TOOL_READ_ONLY_REFUSAL =
   "wordpress_site_tool_call is read-only: it calls only a read ability of the site's catalog. " +
   "Call wordpress_site_tool_write for an ability that writes or publishes.";
@@ -222,18 +228,107 @@ const KNOWN_READ_ABILITIES: ReadonlySet<string> = new Set([
   "ewpa/get-post",
   "ewpa/get-page",
   "ewpa/get-categories",
+  "cinatra/post-read",
 ]);
+// The site's own MCP adapter server. The `ewpa/*` abilities it serves carry no
+// annotations, so their rows are accepted as reads only on this server.
+const DEFAULT_CATALOG_SERVER_ID = "mcp-adapter-default";
+// cinatra#3745: `argsJson` carries the ability's arguments as the text of a
+// JSON object. Exactly one of `args` and `argsJson` may be given. The text is
+// bounded at 256 KiB counted in UTF-8 bytes (the host's limit for one action),
+// must parse to a plain object, and is then checked by the same `args` schema.
+// The refusals are fixed messages and never repeat the text.
+export const SITE_TOOL_ARGS_JSON_MAX_BYTES = 256 * 1024;
+export const SITE_TOOL_ARGS_BOTH_REFUSAL = "Give the tool arguments as args or as argsJson, not both.";
+export const SITE_TOOL_ARGS_JSON_REFUSAL = "argsJson must be the text of a JSON object.";
+export const SITE_TOOL_ARGS_JSON_TOO_LARGE_REFUSAL =
+  `argsJson is larger than ${SITE_TOOL_ARGS_JSON_MAX_BYTES} bytes.`;
+
+type SiteToolCallInput = {
+  toolName: string;
+  args: Record<string, unknown>;
+  instanceId?: string;
+  serverId?: string;
+  // Read tool only: the annotations of the catalog row the read check passed
+  // (see `readRow`). Not part of the SDK call input; today's host ignores it
+  // and nothing in this connector relies on it.
+  expectedRawAnnotations?: Record<string, unknown>;
+};
+
+function parseArgsJson(text: string): Record<string, unknown> {
+  // A string has at least as many UTF-8 bytes as UTF-16 code units, so a long
+  // string is refused before it is encoded.
+  if (text.length > SITE_TOOL_ARGS_JSON_MAX_BYTES || new TextEncoder().encode(text).length > SITE_TOOL_ARGS_JSON_MAX_BYTES) {
+    throw new Error(SITE_TOOL_ARGS_JSON_TOO_LARGE_REFUSAL);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(SITE_TOOL_ARGS_JSON_REFUSAL);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(SITE_TOOL_ARGS_JSON_REFUSAL);
+  }
+  const checked = siteToolCallSchema.shape.args.safeParse(parsed);
+  if (!checked.success || checked.data === undefined) throw new Error(SITE_TOOL_ARGS_JSON_REFUSAL);
+  return checked.data;
+}
+
+/** Parse a site tool input; `args` is resolved from `args` or `argsJson`. */
+function parseSiteToolCallInput(raw: unknown): SiteToolCallInput {
+  const { argsJson, args, ...rest } = siteToolCallSchema.parse(raw);
+  if (argsJson !== undefined && args !== undefined) throw new Error(SITE_TOOL_ARGS_BOTH_REFUSAL);
+  return { ...rest, args: argsJson !== undefined ? parseArgsJson(argsJson) : (args ?? {}) };
+}
+
 const KNOWN_WRITE_ABILITIES: ReadonlySet<string> = new Set([...CONTENT_REVIEW_TARGET_ABILITIES, "ewpa/create-post"]);
 const MAX_CATALOG_PAGES = 20;
 
-type SiteToolCallInput = z.infer<typeof siteToolCallSchema>;
+const hint = (annotations: Record<string, unknown>, mcpKey: string, wpKey: string): unknown =>
+  annotations[mcpKey] ?? annotations[wpKey];
 
-async function isReadAbility(input: SiteToolCallInput): Promise<boolean> {
-  if (KNOWN_WRITE_ABILITIES.has(input.toolName)) return false;
-  if (KNOWN_READ_ABILITIES.has(input.toolName)) return true;
+// Whether the server's own row marks the ability read-only: the host's class
+// for the row is "read" (a read-only hint and no destructive hint), and the
+// stored annotations carry no destructive hint. A known `ewpa/*` read with no
+// annotation at all is accepted only on the default adapter server.
+function rowSaysRead(row: SiteToolRow): boolean {
+  const annotations = row.rawAnnotations ?? {};
+  const destructive = hint(annotations, "destructiveHint", "destructive");
+  const readOnly = hint(annotations, "readOnlyHint", "readonly");
+  if (row.derivedClass === "destructive" || destructive) return false;
+  if (row.derivedClass === "read" && readOnly) return true;
+  return (
+    row.name.startsWith("ewpa/") &&
+    row.serverId === DEFAULT_CATALOG_SERVER_ID &&
+    destructive === undefined &&
+    readOnly === undefined
+  );
+}
+
+// The one catalog row that may serve this call as a read, or null. The ability must be a known read AND its row on the server that will
+// run it must say read-only (`rowSaysRead`). The row is identified by
+// `{serverId, name}`: with a `serverId`, the only row of the name must be on
+// that server; without one, the name must have exactly one row in the whole
+// catalog. A missing row, a row of another server, several rows, an unbound
+// listing or a listing that does not end within MAX_CATALOG_PAGES pages give
+// null; a listing that throws passes its error on. The catalog is read on
+// every call, and the call follows the listing with no other wait.
+//
+// This check is not atomic with the call: the host resolves the call against
+// its own catalog snapshot, which can refresh after this listing, and today it
+// checks only the destructive class at execution (an ordinary write runs). The
+// caller pins the call to the row's `serverId` and also sends the row's
+// annotations as `expectedRawAnnotations`. Today's host copies only the fields
+// it knows and ignores this one, and nothing here relies on it: it is there
+// for a host that refuses an entry whose annotations differ from it, in the
+// same resolution that executes the call.
+async function readRow(input: SiteToolCallInput): Promise<SiteToolRow | null> {
+  if (KNOWN_WRITE_ABILITIES.has(input.toolName)) return null;
+  if (!KNOWN_READ_ABILITIES.has(input.toolName)) return null;
   const list = getWordPressDeps().listSiteTools;
-  if (typeof list !== "function") return false;
-  let found = false;
+  if (typeof list !== "function") return null;
+  const rows: SiteToolRow[] = [];
   let cursor: string | undefined;
   for (let page = 0; page < MAX_CATALOG_PAGES; page++) {
     const result = await list({
@@ -241,15 +336,16 @@ async function isReadAbility(input: SiteToolCallInput): Promise<boolean> {
       ...(input.serverId !== undefined ? { serverId: input.serverId } : {}),
       ...(cursor !== undefined ? { cursor } : {}),
     });
-    for (const row of result.tools) {
-      if (row.name !== input.toolName) continue;
-      if (row.derivedClass !== "read") return false;
-      found = true;
-    }
+    rows.push(...result.tools.filter((row) => row.name === input.toolName));
     cursor = result.nextCursor;
-    if (cursor === undefined) return found;
+    if (cursor === undefined) {
+      if (rows.length !== 1) return null;
+      const [only] = rows as [SiteToolRow];
+      if (input.serverId !== undefined && only.serverId !== input.serverId) return null;
+      return rowSaysRead(only) ? only : null;
+    }
   }
-  return false;
+  return null;
 }
 
 // The governed forward both site tools share; `tool` names the calling tool.
@@ -279,6 +375,7 @@ async function forwardSiteTool(input: SiteToolCallInput, tool: string): Promise<
     args: input.args,
     ...(input.instanceId !== undefined ? { instanceId: input.instanceId } : {}),
     ...(input.serverId !== undefined ? { serverId: input.serverId } : {}),
+    ...(input.expectedRawAnnotations !== undefined ? { expectedRawAnnotations: input.expectedRawAnnotations } : {}),
   });
 }
 
@@ -291,14 +388,18 @@ export function createWordPressPrimitiveHandlers() {
     // from the MCP request frame (§2.4) — the synthetic request.actor literal is
     // never read here for any decision.
     "wordpress_site_tool_call": async (request: ExtensionPrimitiveRequest<unknown>) => {
-      const input = siteToolCallSchema.parse(request.input);
-      if (!(await isReadAbility(input))) throw new Error(SITE_TOOL_READ_ONLY_REFUSAL);
-      return forwardSiteTool(input, "wordpress_site_tool_call");
+      const input = parseSiteToolCallInput(request.input);
+      const row = await readRow(input);
+      if (row === null) throw new Error(SITE_TOOL_READ_ONLY_REFUSAL);
+      return forwardSiteTool(
+        { ...input, serverId: row.serverId, expectedRawAnnotations: row.rawAnnotations },
+        "wordpress_site_tool_call",
+      );
     },
 
     // cinatra#3745: every write and publish of a site ability; declared outward.
     "wordpress_site_tool_write": async (request: ExtensionPrimitiveRequest<unknown>) =>
-      forwardSiteTool(siteToolCallSchema.parse(request.input), "wordpress_site_tool_write"),
+      forwardSiteTool(parseSiteToolCallInput(request.input), "wordpress_site_tool_write"),
 
     "wordpress_site_tools_list": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const input = siteToolsListSchema.parse(request.input);
