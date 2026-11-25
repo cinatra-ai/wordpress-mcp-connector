@@ -61,8 +61,9 @@ const OUTWARD = { outward: {} };
 // a step only when its registration declares `passthroughStep`:
 //   - "read": served to a verified step whose tool list names the tool, with no
 //     person's decision; the host allows it only on a registration with no
-//     `outward`. The read tool refuses every ability the site's catalog does not
-//     list as read (`isReadAbility` in ./handlers), so this road cannot write.
+//     `outward`. The read tool serves only a known read whose catalog row, on the
+//     server that runs it, says read-only (`readRowServerId` in ./handlers),
+//     so this road cannot write.
 //   - "publishing": served only to a declared publishing step whose card a
 //     person released, consumed once per released decision.
 // Spread from a constant, like `outward`, so an SDK config type without the

@@ -26,10 +26,17 @@ const listSiteToolsMock = vi.fn(
   async (_input: unknown): Promise<SiteToolsListPage> => ({ tools: [], catalogRevision: "rev-1" }),
 );
 
-function row(name: string, derivedClass: SiteToolRow["derivedClass"], rawAnnotations: Record<string, unknown> = {}): SiteToolRow {
+const DEFAULT_SERVER = "mcp-adapter-default";
+
+function row(
+  name: string,
+  derivedClass: SiteToolRow["derivedClass"],
+  rawAnnotations: Record<string, unknown> = {},
+  serverId = "srv-1",
+): SiteToolRow {
   return {
     name,
-    serverId: "srv-1",
+    serverId,
     inputSchema: {},
     rawAnnotations,
     derivedClass,
@@ -117,6 +124,7 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
         toolName: "cinatra/post-read",
         args: { post_id: 42 },
         instanceId: "wp-1",
+        serverId: "srv-1",
       });
     });
 
@@ -204,6 +212,120 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
   });
 
   describe("the read tool never reaches a writing ability", () => {
+    // The read exemption is decided on the catalog row of the server that will
+    // run the call, never on the ability name alone.
+    const readOnly = { readOnlyHint: true, destructiveHint: false };
+
+    it("refuses a known read name that a second enrolled server exposes as a writer, and forwards nothing", async () => {
+      listSiteToolsMock.mockResolvedValueOnce({
+        tools: [row("ewpa/get-post", "write", { readOnlyHint: false }, "wps-other")],
+        catalogRevision: "rev-1",
+      });
+      await expect(
+        read({ toolName: "ewpa/get-post", argsJson: '{"post_id":1}', instanceId: "wp-1", serverId: "wps-other" }),
+      ).rejects.toThrow(SITE_TOOL_READ_ONLY_REFUSAL);
+      expect(listSiteToolsMock).toHaveBeenCalledWith({ instanceId: "wp-1", serverId: "wps-other" });
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
+    });
+
+    it("refuses a known read name that a second server exposes as destructive, even with a read-only hint", async () => {
+      listSiteToolsMock.mockResolvedValueOnce({
+        tools: [row("ewpa/get-post", "destructive", { readOnlyHint: true, destructiveHint: true }, "wps-other")],
+        catalogRevision: "rev-1",
+      });
+      await expect(
+        read({ toolName: "ewpa/get-post", args: { post_id: 1 }, instanceId: "wp-1", serverId: "wps-other" }),
+      ).rejects.toThrow(SITE_TOOL_READ_ONLY_REFUSAL);
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
+    });
+
+    it("refuses a known read name the default server reads but a second server writes, when no server is named", async () => {
+      listSiteToolsMock.mockResolvedValueOnce({
+        tools: [
+          row("ewpa/get-post", "write", {}, DEFAULT_SERVER),
+          row("ewpa/get-post", "write", { readOnlyHint: false }, "wps-other"),
+        ],
+        catalogRevision: "rev-1",
+      });
+      await expect(read({ toolName: "ewpa/get-post", args: { post_id: 1 }, instanceId: "wp-1" })).rejects.toThrow(
+        SITE_TOOL_READ_ONLY_REFUSAL,
+      );
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
+    });
+
+    it("refuses a row whose stored annotations carry a destructive hint, whatever its class says", async () => {
+      listSiteToolsMock.mockResolvedValueOnce({
+        tools: [row("cinatra/post-read", "read", { readonly: true, destructive: true }, DEFAULT_SERVER)],
+        catalogRevision: "rev-1",
+      });
+      await expect(read({ toolName: "cinatra/post-read", args: { post_id: 1 }, instanceId: "wp-1" })).rejects.toThrow(
+        SITE_TOOL_READ_ONLY_REFUSAL,
+      );
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
+    });
+
+    it("refuses a known read name with no catalog row, and forwards nothing", async () => {
+      listSiteToolsMock.mockResolvedValueOnce({ tools: [], catalogRevision: "rev-1" });
+      await expect(read({ toolName: "cinatra/post-read", args: { post_id: 1 }, instanceId: "wp-1" })).rejects.toThrow(
+        SITE_TOOL_READ_ONLY_REFUSAL,
+      );
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
+    });
+
+    it("refuses when the only row of the name belongs to another server than the one named", async () => {
+      listSiteToolsMock.mockResolvedValueOnce({
+        tools: [row("cinatra/post-read", "read", readOnly, DEFAULT_SERVER)],
+        catalogRevision: "rev-1",
+      });
+      await expect(
+        read({ toolName: "cinatra/post-read", args: { post_id: 1 }, instanceId: "wp-1", serverId: "wps-other" }),
+      ).rejects.toThrow(SITE_TOOL_READ_ONLY_REFUSAL);
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
+    });
+
+    it("refuses an ability the catalog lists as read when its name is not a known read", async () => {
+      listSiteToolsMock.mockResolvedValueOnce({ tools: [row("x/note-get", "read", readOnly)], catalogRevision: "rev-1" });
+      await expect(read({ toolName: "x/note-get", instanceId: "wp-1" })).rejects.toThrow(SITE_TOOL_READ_ONLY_REFUSAL);
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
+    });
+
+    it("serves the genuine read and pins the call to the server whose row was read", async () => {
+      listSiteToolsMock.mockResolvedValueOnce({
+        tools: [row("cinatra/post-read", "read", readOnly, DEFAULT_SERVER)],
+        catalogRevision: "rev-1",
+      });
+      await read({ toolName: "cinatra/post-read", argsJson: '{"post_id":42}', instanceId: "wp-1" });
+      expect(invokeSiteToolMock).toHaveBeenCalledWith({
+        toolName: "cinatra/post-read",
+        args: { post_id: 42 },
+        instanceId: "wp-1",
+        serverId: DEFAULT_SERVER,
+      });
+    });
+
+    it("serves an unannotated known ewpa read only on the default adapter server", async () => {
+      listSiteToolsMock.mockResolvedValueOnce({ tools: [row("ewpa/get-post", "write", {}, DEFAULT_SERVER)], catalogRevision: "rev-1" });
+      await read({ toolName: "ewpa/get-post", args: { post_id: 42 }, instanceId: "wp-1" });
+      expect(invokeSiteToolMock).toHaveBeenCalledWith({
+        toolName: "ewpa/get-post",
+        args: { post_id: 42 },
+        instanceId: "wp-1",
+        serverId: DEFAULT_SERVER,
+      });
+      invokeSiteToolMock.mockClear();
+      listSiteToolsMock.mockResolvedValueOnce({ tools: [row("ewpa/get-post", "write", {}, "wps-other")], catalogRevision: "rev-1" });
+      await expect(read({ toolName: "ewpa/get-post", args: { post_id: 42 }, instanceId: "wp-1" })).rejects.toThrow(
+        SITE_TOOL_READ_ONLY_REFUSAL,
+      );
+      expect(invokeSiteToolMock).not.toHaveBeenCalled();
+    });
+
+    it("the publishing tool is unchanged: it lists no catalog and adds no server", async () => {
+      await write({ toolName: "ewpa/get-post", args: { post_id: 1 }, instanceId: "wp-1" });
+      expect(listSiteToolsMock).not.toHaveBeenCalled();
+      expect(invokeSiteToolMock).toHaveBeenCalledWith({ toolName: "ewpa/get-post", args: { post_id: 1 }, instanceId: "wp-1" });
+    });
+
     it("refuses the plugin's guarded update ability, which the catalog marks destructive", async () => {
       listSiteToolsMock.mockResolvedValueOnce({
         tools: [row("cinatra/post-update-if-unchanged", "destructive", { readonly: false, destructive: true })],
@@ -215,9 +337,12 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
       expect(invokeSiteToolMock).not.toHaveBeenCalled();
     });
 
-    it("refuses an ability without the read-only annotation (the host lists it as write)", async () => {
-      listSiteToolsMock.mockResolvedValueOnce({ tools: [row("x/unannotated", "write")], catalogRevision: "rev-1" });
-      await expect(read({ toolName: "x/unannotated", argsJson: "{}", instanceId: "wp-1" })).rejects.toThrow(
+    it("refuses a known read whose row has no read-only annotation (the host lists it as write)", async () => {
+      listSiteToolsMock.mockResolvedValueOnce({
+        tools: [row("core/get-site-info", "write", {}, DEFAULT_SERVER)],
+        catalogRevision: "rev-1",
+      });
+      await expect(read({ toolName: "core/get-site-info", argsJson: "{}", instanceId: "wp-1" })).rejects.toThrow(
         SITE_TOOL_READ_ONLY_REFUSAL,
       );
       expect(invokeSiteToolMock).not.toHaveBeenCalled();
@@ -225,7 +350,9 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
 
     it("refuses when the catalog cannot be read", async () => {
       listSiteToolsMock.mockRejectedValueOnce(new Error("catalog unavailable"));
-      await expect(read({ toolName: "x/note-get", argsJson: "{}", instanceId: "wp-1" })).rejects.toThrow();
+      await expect(read({ toolName: "cinatra/post-read", argsJson: "{}", instanceId: "wp-1" })).rejects.toThrow(
+        "catalog unavailable",
+      );
       expect(invokeSiteToolMock).not.toHaveBeenCalled();
     });
   });
