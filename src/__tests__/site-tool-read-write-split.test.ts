@@ -63,6 +63,7 @@ describe("the site tools split into a read proxy and an outward write tool (cina
     registerWordPressConnector({
       invokeSiteTool: invokeSiteToolMock,
       invokeSiteToolGuarded: invokeSiteToolGuardedMock,
+      siteToolGuardSupported: () => true,
       listSiteTools: listSiteToolsMock,
     } as unknown as WordPressConnectorDeps);
     handlers = createWordPressPrimitiveHandlers();
@@ -168,6 +169,7 @@ describe("the site tools split into a read proxy and an outward write tool (cina
     registerWordPressConnector({
       invokeSiteTool: invokeSiteToolMock,
       invokeSiteToolGuarded: invokeSiteToolGuardedMock,
+      siteToolGuardSupported: () => true,
     } as unknown as WordPressConnectorDeps);
     await expect(
       (createWordPressPrimitiveHandlers() as any).wordpress_site_tool_call({

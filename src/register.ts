@@ -274,6 +274,13 @@ function buildHostBoundDeps(
       }
       return (guarded as (call: GuardedSiteToolCallInput) => Promise<unknown>).call(svc, input);
     },
+    // cinatra#3745 - presence of the guarded method, read from the host service
+    // at call time on every call (the service resolves lazily, so the answer
+    // follows the host that serves the call). A host that has not published the
+    // invoker service at all throws here, as every invoker member does.
+    siteToolGuardSupported: () =>
+      typeof (connectorInstanceInvoker() as { invokeSiteToolGuarded?: unknown }).invokeSiteToolGuarded ===
+      "function",
     listSiteTools: async (input) => connectorInstanceInvoker().listSiteTools(input),
     // cinatra#2019 trusted-site mode — the per-instance native read-injection
     // opt-in surface, resolved lazily from the `@cinatra-ai/host:wordpress-mcp`

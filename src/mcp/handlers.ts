@@ -378,6 +378,35 @@ export const SITE_TOOL_CATALOG_CHANGED_REFUSAL =
   "wordpress_site_tool_call refused: the site tool changed after it was listed. " +
   "Nothing was run. Call wordpress_site_tool_call again to read the current catalog.";
 
+// cinatra#3745: the fixed refusal of a listed row the guarded call cannot carry
+// (no server id, or annotations that are not a plain object), and of the
+// host's `guarded_server_id_required`.
+export const SITE_TOOL_LISTED_ROW_REFUSAL =
+  "wordpress_site_tool_call refused: the listed site tool has no server id or its annotations are not plain data. " +
+  "Nothing was run.";
+
+// Whether `value` is plain data: a primitive, an array, or an object whose
+// prototype is `Object.prototype` or `null`, at every depth (the host's
+// predicate). A Map, a Date, a class instance or a cycle is not.
+function isPlainData(value: unknown, seen: WeakSet<object> = new WeakSet()): boolean {
+  if (value === null || typeof value !== "object") return typeof value !== "bigint";
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.every((item) => isPlainData(item, seen));
+  const proto: unknown = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return false;
+  return Object.values(value).every((item) => isPlainData(item, seen));
+}
+
+// The listed row's annotations as the guarded call carries them: an absent
+// value (an unannotated row) becomes a plain `{}`; a value that is not a plain
+// object at every depth gives null and the call is refused.
+function guardAnnotations(raw: unknown): Record<string, unknown> | null {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== "object" || Array.isArray(raw) || !isPlainData(raw)) return null;
+  return raw as Record<string, unknown>;
+}
+
 // The read tool's call, through the host's GUARDED method only. It sends the
 // listed row's server and raw annotations, and asserts the read class unless
 // the row is an unannotated known `ewpa/*` read on the default adapter server
@@ -388,7 +417,10 @@ export const SITE_TOOL_CATALOG_CHANGED_REFUSAL =
 async function callGuardedRead(input: SiteToolCallInput, row: SiteToolRow): Promise<unknown> {
   const guarded = getWordPressDeps().invokeSiteToolGuarded;
   if (typeof guarded !== "function") throw new Error(SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL);
-  const annotations = row.rawAnnotations ?? {};
+  const annotations = guardAnnotations(row.rawAnnotations);
+  if (typeof row.serverId !== "string" || row.serverId.length === 0 || annotations === null) {
+    throw new Error(SITE_TOOL_LISTED_ROW_REFUSAL);
+  }
   const readOnly = hint(annotations, "readOnlyHint", "readonly");
   const call: GuardedSiteToolCallInput = {
     toolName: input.toolName,
@@ -404,6 +436,7 @@ async function callGuardedRead(input: SiteToolCallInput, row: SiteToolRow): Prom
     const code = (error as { code?: unknown } | null)?.code;
     if (code === "catalog_entry_changed") throw new Error(SITE_TOOL_CATALOG_CHANGED_REFUSAL, { cause: error });
     if (code === "catalog_entry_not_read") throw new Error(SITE_TOOL_READ_ONLY_REFUSAL, { cause: error });
+    if (code === "guarded_server_id_required") throw new Error(SITE_TOOL_LISTED_ROW_REFUSAL, { cause: error });
     if (code === "guarded_call_required") throw new Error(SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL, { cause: error });
     throw error;
   }
@@ -419,9 +452,16 @@ export function createWordPressPrimitiveHandlers() {
     // never read here for any decision.
     "wordpress_site_tool_call": async (request: ExtensionPrimitiveRequest<unknown>) => {
       const input = parseSiteToolCallInput(request.input);
-      // cinatra#3745: a read needs the host's guarded method; without it the
-      // tool is denied before the catalog is read or anything is sent.
-      if (typeof getWordPressDeps().invokeSiteToolGuarded !== "function") {
+      // cinatra#3745: a read needs the host's guarded method. Presence is
+      // decided first, from the host service at call time
+      // (`siteToolGuardSupported`); without it the tool is denied before the
+      // catalog is read or anything else is called on the host.
+      const deps = getWordPressDeps();
+      if (
+        typeof deps.invokeSiteToolGuarded !== "function" ||
+        typeof deps.siteToolGuardSupported !== "function" ||
+        deps.siteToolGuardSupported() !== true
+      ) {
         throw new Error(SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL);
       }
       const row = await readRow(input);

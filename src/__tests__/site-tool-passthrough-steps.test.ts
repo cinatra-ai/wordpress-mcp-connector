@@ -69,6 +69,7 @@ describe("passthrough step declarations and JSON text arguments (cinatra#3745)",
     registerWordPressConnector({
       invokeSiteTool: invokeSiteToolMock,
       invokeSiteToolGuarded: invokeSiteToolGuardedMock,
+      siteToolGuardSupported: () => true,
       listSiteTools: listSiteToolsMock,
       listMcpInstances: () => [
         { id: "wp-1", siteUrl: "https://example.com", username: "u", applicationPassword: "p", name: "Site 1", createdAt: "", updatedAt: "" },

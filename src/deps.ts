@@ -39,8 +39,9 @@ export type GuardedSiteToolCallInput = {
   toolName: string;
   args: Record<string, unknown>;
   instanceId?: string;
-  serverId?: string;
-  /** The `rawAnnotations` of the row the connector listed, unchanged. */
+  /** REQUIRED: the non-empty `serverId` of the row the connector listed. */
+  serverId: string;
+  /** The `rawAnnotations` of the row the connector listed, as a plain object. */
   expectedRawAnnotations: Record<string, unknown>;
   expectedClass?: "read";
 };
@@ -689,6 +690,16 @@ export interface WordPressConnectorDeps {
    * read tool the same way.
    */
   invokeSiteToolGuarded?: (input: GuardedSiteToolCallInput) => Promise<unknown>;
+  /**
+   * Whether the host has the guarded method (cinatra#3745). `register.ts`
+   * resolves the host invoker service AT CALL TIME on every call (the service
+   * is resolved lazily, never at registration) and returns whether it has a
+   * callable `invokeSiteToolGuarded`. The read tool asks this FIRST and, on
+   * anything but `true`, answers `SITE_TOOL_GUARDED_UNSUPPORTED_REFUSAL` with
+   * no catalog read and no other host call. OPTIONAL for skew: unbound means
+   * unsupported.
+   */
+  siteToolGuardSupported?: () => boolean;
   /**
    * GOVERNED CATALOG LISTING — backs `wordpress_site_tools_list`. Same host-derived
    * identity + fail-closed posture as `invokeSiteTool`. The host runs the SAME pin
