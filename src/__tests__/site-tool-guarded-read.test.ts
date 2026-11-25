@@ -365,20 +365,76 @@ describe("the read tool checks host support first and sends only a usable listed
     expect(Object.getPrototypeOf(sent.expectedRawAnnotations)).toBe(Object.prototype);
   });
 
-  it.each([
-    ["a Map", new Map([["readOnlyHint", true]])],
-    ["a class instance", new (class Annotations { readOnlyHint = true })()],
-    ["a plain object with a nested Date", { readOnlyHint: true, at: new Date(0) }],
-    ["a plain object with a Map inside an array", { readOnlyHint: true, list: [new Map()] }],
-  ])("annotations that are %s are refused before the call", async (_label, rawAnnotations) => {
+  // Annotations are JSON data only, at every depth: null, boolean, finite
+  // number, string, arrays of such and plain objects of such with string keys.
+  // Everything else is refused before the call with the exact refusal.
+  const notJson: Array<[string, () => unknown]> = [
+    ["a function", () => () => {}],
+    ["a symbol", () => Symbol("s")],
+    ["a bigint", () => BigInt(1)],
+    ["NaN", () => Number.NaN],
+    ["Infinity", () => Number.POSITIVE_INFINITY],
+    ["-Infinity", () => Number.NEGATIVE_INFINITY],
+    ["undefined", () => undefined],
+    ["a Map", () => new Map()],
+    ["a Set", () => new Set()],
+    ["a Date", () => new Date(0)],
+    ["a class instance", () => new (class Thing { a = 1 })()],
+  ];
+  const withValue = (where: string, value: unknown): Record<string, unknown> => {
+    if (where === "at top level") return { readOnlyHint: true, x: value };
+    if (where === "nested in an object") return { readOnlyHint: true, x: { y: value } };
+    return { readOnlyHint: true, x: [1, value] };
+  };
+  const cases: Array<[string, () => unknown]> = [];
+  for (const where of ["at top level", "nested in an object", "inside an array"]) {
+    for (const [kind, make] of notJson) cases.push([`${kind} ${where}`, () => withValue(where, make())]);
+  }
+  cases.push(
+    ["a Map as the whole value", () => Object.assign(new Map(), { readOnlyHint: true })],
+    ["a class instance as the whole value", () => new (class Annotations { readOnlyHint = true })()],
+    ["a symbol key", () => ({ readOnlyHint: true, [Symbol("k")]: 1 })],
+    ["a hole in an array", () => ({ readOnlyHint: true, x: [1, , 2] })],
+    [
+      "a cycle",
+      () => {
+        const a: Record<string, unknown> = { readOnlyHint: true };
+        a.self = a;
+        return a;
+      },
+    ],
+  );
+
+  it.each(cases)("annotations with %s are refused before the call", async (_label, make) => {
     bind();
     listSiteToolsMock.mockResolvedValueOnce({
-      tools: [{ ...readRowOf("core/get-site-info"), rawAnnotations: rawAnnotations as never }],
+      tools: [{ ...readRowOf("core/get-site-info"), rawAnnotations: make() as never }],
       catalogRevision: "rev-1",
     });
-    await expect(read({ toolName: "core/get-site-info", instanceId: "wp-1" })).rejects.toThrow();
+    await expect(read({ toolName: "core/get-site-info", instanceId: "wp-1" })).rejects.toThrow(
+      SITE_TOOL_LISTED_ROW_REFUSAL,
+    );
     expect(invokeSiteToolGuardedMock).not.toHaveBeenCalled();
     expect(invokeSiteToolMock).not.toHaveBeenCalled();
+  });
+
+  it("JSON data annotations at every depth are sent unchanged", async () => {
+    bind();
+    const annotations = {
+      readOnlyHint: true,
+      n: null,
+      f: 1.5,
+      s: "x",
+      list: [1, "a", null, { b: false }],
+      nested: Object.assign(Object.create(null), { c: [] }),
+    };
+    listSiteToolsMock.mockResolvedValueOnce({
+      tools: [{ ...readRowOf("core/get-site-info"), rawAnnotations: annotations }],
+      catalogRevision: "rev-1",
+    });
+    await read({ toolName: "core/get-site-info", instanceId: "wp-1" });
+    const sent = invokeSiteToolGuardedMock.mock.calls[0]![0] as { expectedRawAnnotations: unknown };
+    expect(sent.expectedRawAnnotations).toBe(annotations);
   });
 
   it("guarded_server_id_required from the host becomes a plain refusal", async () => {

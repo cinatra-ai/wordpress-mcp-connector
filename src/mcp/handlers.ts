@@ -385,25 +385,39 @@ export const SITE_TOOL_LISTED_ROW_REFUSAL =
   "wordpress_site_tool_call refused: the listed site tool has no server id or its annotations are not plain data. " +
   "Nothing was run.";
 
-// Whether `value` is plain data: a primitive, an array, or an object whose
-// prototype is `Object.prototype` or `null`, at every depth (the host's
-// predicate). A Map, a Date, a class instance or a cycle is not.
-function isPlainData(value: unknown, seen: WeakSet<object> = new WeakSet()): boolean {
-  if (value === null || typeof value !== "object") return typeof value !== "bigint";
-  if (seen.has(value)) return false;
-  seen.add(value);
-  if (Array.isArray(value)) return value.every((item) => isPlainData(item, seen));
-  const proto: unknown = Object.getPrototypeOf(value);
-  if (proto !== Object.prototype && proto !== null) return false;
-  return Object.values(value).every((item) => isPlainData(item, seen));
+// Whether `value` is JSON data, at every depth. ALLOWED, and nothing else:
+// null, a boolean, a finite number, a string, an array whose every index
+// holds such a value (no holes), and a plain object (prototype
+// `Object.prototype` or `null`) with only string keys whose every value is
+// such a value. A key holding `undefined`, a function or a symbol is NOT
+// dropped (the host's canonical form would drop it and compare the row equal
+// to one without that key): it fails the check like any other value.
+function isJsonData(value: unknown, path: Set<object> = new Set()): boolean {
+  if (value === null || typeof value === "boolean" || typeof value === "string") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value !== "object" || path.has(value)) return false;
+  path.add(value);
+  let ok: boolean;
+  if (Array.isArray(value)) {
+    ok = true;
+    for (let i = 0; i < value.length && ok; i++) ok = i in value && isJsonData(value[i], path);
+  } else {
+    const proto: unknown = Object.getPrototypeOf(value);
+    ok =
+      (proto === Object.prototype || proto === null) &&
+      Object.getOwnPropertySymbols(value).length === 0 &&
+      Object.values(value).every((item) => isJsonData(item, path));
+  }
+  path.delete(value);
+  return ok;
 }
 
 // The listed row's annotations as the guarded call carries them: an absent
-// value (an unannotated row) becomes a plain `{}`; a value that is not a plain
-// object at every depth gives null and the call is refused.
+// value (an unannotated row) becomes a plain `{}`; anything but a plain object
+// of JSON data gives null and the call is refused.
 function guardAnnotations(raw: unknown): Record<string, unknown> | null {
   if (raw === undefined || raw === null) return {};
-  if (typeof raw !== "object" || Array.isArray(raw) || !isPlainData(raw)) return null;
+  if (typeof raw !== "object" || Array.isArray(raw) || !isJsonData(raw)) return null;
   return raw as Record<string, unknown>;
 }
 
